@@ -46,11 +46,13 @@ async def lifespan(app: FastAPI):
 
 async def _sync_loop(gh: GitHubIssues) -> None:
     """Periodically sync issues from GitHub."""
+    import logging
+    logger = logging.getLogger(__name__)
     while True:
         try:
             await gh.sync_all()
         except Exception:
-            pass  # Log and continue
+            logger.exception("GitHub sync failed")
         await asyncio.sleep(60)
 
 

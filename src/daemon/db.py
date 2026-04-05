@@ -79,7 +79,12 @@ class Database:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
+    _SESSION_COLUMNS = {"status", "pid", "ended_at"}
+
     async def update_session(self, session_id: str, **kwargs: object) -> None:
+        bad_keys = set(kwargs) - self._SESSION_COLUMNS
+        if bad_keys:
+            raise ValueError(f"Invalid session columns: {bad_keys}")
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values())
         vals.append(session_id)

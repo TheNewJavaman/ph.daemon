@@ -50,6 +50,7 @@ class BaseAgent:
         self.issue_id = issue_id
         self.session_id: str | None = None
         self._proc: asyncio.subprocess.Process | None = None
+        self._log_file = None
 
     @property
     def log_path(self) -> Path:
@@ -110,10 +111,10 @@ class BaseAgent:
             )
         else:
             # Non-interactive: capture output to log file
-            log_file = open(self.log_path, "w")
+            self._log_file = open(self.log_path, "w")
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=log_file,
+                stdout=self._log_file,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=self.config.project_dir,
             )
@@ -121,10 +122,16 @@ class BaseAgent:
         await self.db.update_session(self.session_id, pid=self._proc.pid)
         return self.session_id
 
+    def _close_log(self) -> None:
+        if self._log_file is not None:
+            self._log_file.close()
+            self._log_file = None
+
     async def wait(self) -> int:
         """Wait for the subprocess to finish. Returns exit code."""
         assert self._proc is not None
         code = await self._proc.wait()
+        self._close_log()
         now = datetime.now(timezone.utc).isoformat()
         status = "completed" if code == 0 else "failed"
         await self.db.update_session(
@@ -142,6 +149,7 @@ class BaseAgent:
         except TimeoutError:
             self._proc.kill()
             await self._proc.wait()
+        self._close_log()
         now = datetime.now(timezone.utc).isoformat()
         await self.db.update_session(
             self.session_id, status="killed", ended_at=now

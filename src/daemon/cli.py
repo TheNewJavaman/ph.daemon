@@ -139,28 +139,22 @@ def start(port: int) -> None:
 @main.command()
 @click.argument("description")
 def task(description: str) -> None:
-    """Submit a task (opens interactive session to refine, then plans)."""
+    """Submit a task (opens interactive session to refine and create issues)."""
     config = _get_config()
 
     async def _run() -> None:
         from daemon.db import Database
         from daemon.github.issues import GitHubIssues
-        from daemon.agents.ephemeral import run_ephemeral_interactive
-        from daemon.agents.planner import run_planner
+        from daemon.agents.planner import run_planner_interactive
 
         db = Database(config.db_path)
         await db.init()
         gh = GitHubIssues(config=config, db=db)
 
         try:
-            # Phase 1: Interactive refinement
-            click.echo("Opening interactive session to refine your task...")
-            click.echo("When done, exit the session and the planner will create issues.")
-            await run_ephemeral_interactive(config, db, f"Help me refine this task: {description}")
-
-            # Phase 2: Planner creates issues
-            click.echo("\nDispatching planner to create issues...")
-            await run_planner(config, db, gh, description)
+            click.echo("Opening interactive planner session...")
+            click.echo("Refine the task, then the planner will create issues.")
+            await run_planner_interactive(config, db, gh, description)
             click.echo("Done. Issues created. The implementor will pick them up.")
         finally:
             await db.close()

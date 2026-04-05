@@ -122,17 +122,37 @@ async def resume_director(request: Request):
 
 @router.post("/api/agents/{session_id}/kill")
 async def kill_agent(request: Request, session_id: str):
-    # Find the running agent and kill it
+    """Kill a running agent with SIGTERM → 5s grace → SIGKILL."""
+    import os
+    import signal
+
     db = request.app.state.db
     session = await db.get_session(session_id)
-    if session and session["status"] == "running" and session["pid"]:
-        import os
-        import signal
-        try:
-            os.kill(session["pid"], signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        await db.update_session(session_id, status="killed")
+    if not session or session["status"] != "running" or not session["pid"]:
+        return HTMLResponse('<span class="status killed">Killed</span>')
+
+    pid = session["pid"]
+    try:
+        os.kill(pid, signal.SIGTERM)
+        # Wait up to 5s for graceful shutdown
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            try:
+                os.kill(pid, 0)  # Check if still alive
+            except ProcessLookupError:
+                break
+        else:
+            # Still alive after 5s — force kill
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    except ProcessLookupError:
+        pass  # Already dead
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    await db.update_session(session_id, status="killed", ended_at=now)
     return HTMLResponse('<span class="status killed">Killed</span>')
 
 
