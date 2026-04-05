@@ -59,8 +59,10 @@ class Database:
         agent_type: str,
         issue_id: int | None,
         log_path: str,
+        session_id: str | None = None,
     ) -> str:
-        session_id = uuid.uuid4().hex[:12]
+        if session_id is None:
+            session_id = uuid.uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat()
         await self.conn.execute(
             "INSERT INTO sessions (id, agent_type, issue_id, log_path, started_at) "
