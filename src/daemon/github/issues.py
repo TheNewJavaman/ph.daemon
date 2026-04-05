@@ -115,7 +115,7 @@ class GitHubIssues:
             "--json", "number,title,body,state,labels,assignees,comments",
         )
         data = json.loads(raw)
-        labels = [l["name"] for l in data.get("labels", [])]
+        labels = [lbl["name"] for lbl in data.get("labels", [])]
         assignees = data.get("assignees", [])
         assignee = assignees[0]["login"] if assignees else None
         comments = [
@@ -147,7 +147,7 @@ class GitHubIssues:
             "--json", "number,title,body,state,labels,assignees,comments",
         )
         for data in json.loads(raw):
-            labels = [l["name"] for l in data.get("labels", [])]
+            labels = [lbl["name"] for lbl in data.get("labels", [])]
             assignees = data.get("assignees", [])
             assignee = assignees[0]["login"] if assignees else None
             comments = [

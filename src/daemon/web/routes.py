@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 router = APIRouter()
@@ -118,3 +119,32 @@ async def kill_agent(request: Request, session_id: str):
             pass
         await db.update_session(session_id, status="killed")
     return HTMLResponse('<span class="status killed">Killed</span>')
+
+
+@router.post("/api/paper/update")
+async def trigger_paper_update(request: Request):
+    from daemon.agents.paper import run_paper_update
+    config = request.app.state.config
+    db = request.app.state.db
+    asyncio.create_task(run_paper_update(config, db))
+    return HTMLResponse('<p style="color: var(--green);">Paper update triggered.</p>')
+
+
+@router.post("/api/constraints/add")
+async def add_constraint(request: Request):
+    form = await request.form()
+    description = form.get("description", "")
+    if not description:
+        return HTMLResponse("Description required", status_code=400)
+
+    config = request.app.state.config
+    db = request.app.state.db
+
+    # Spawn an ephemeral agent to handle the constraint addition
+    from daemon.agents.ephemeral import run_ephemeral_interactive
+    asyncio.create_task(
+        run_ephemeral_interactive(config, db, f"Add this constraint: {description}")
+    )
+
+    # Redirect back to constraints page
+    return RedirectResponse("/constraints", status_code=303)

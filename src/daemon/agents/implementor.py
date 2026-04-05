@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 from daemon.agents.base import AgentType, BaseAgent

@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import json
-from unittest.mock import AsyncMock, patch
 
-import pytest
 
 from daemon.github.issues import (
-    GitHubIssues,
     parse_dependencies,
     resolve_dependency_dag,
 )

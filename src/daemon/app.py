@@ -4,7 +4,6 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 from daemon.config import ProjectConfig
 from daemon.db import Database
