@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sys
 from pathlib import Path
 
 import click
-import uvicorn
 
 from daemon.config import ProjectConfig
 
@@ -30,28 +28,34 @@ def _get_config() -> ProjectConfig:
     return ProjectConfig.load(project_dir)
 
 
-@click.group()
-def main() -> None:
+@click.group(invoke_without_command=True)
+@click.pass_context
+def main(ctx: click.Context) -> None:
     """ph.daemon — automated research harness."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    if ctx.invoked_subcommand is None:
+        config = _get_config()
+        from daemon.tui import DaemonApp
+        try:
+            DaemonApp(config=config).run()
+        finally:
+            # Reset terminal in case a subprocess left it in a bad state
+            import os
+            os.system("stty sane 2>/dev/null; tput reset 2>/dev/null")
 
 
 @main.command()
-@click.argument("project_path", type=click.Path())
-@click.option("--repo", required=True, help="GitHub repo in owner/repo format")
-def init(project_path: str, repo: str) -> None:
+@click.argument("project_path", type=click.Path(), default=".")
+def init(project_path: str) -> None:
     """Initialize a new research project."""
     project = Path(project_path).resolve()
-    config = ProjectConfig(project_dir=project, repo=repo)
+    config = ProjectConfig(project_dir=project)
 
-    # Create directory structure
     config.daemon_dir.mkdir(parents=True, exist_ok=True)
     config.logs_dir.mkdir(parents=True, exist_ok=True)
     (project / "docs").mkdir(parents=True, exist_ok=True)
     config.paper_dir.mkdir(parents=True, exist_ok=True)
-    (project / ".claude").mkdir(parents=True, exist_ok=True)
 
-    # Save config
     config.save()
 
     # CLAUDE.md
@@ -60,15 +64,13 @@ def init(project_path: str, repo: str) -> None:
         claude_md.write_text(
             "# Research Project\n\n"
             "## Daemon\n\n"
-            "This project is managed by ph.daemon. All work is tracked in GitHub issues.\n\n"
-            "- Every code change must reference a GitHub issue number in the commit message\n"
-            "- Before starting work, check existing issues (open and closed) for prior decisions\n"
-            "- After each commit, update the linked issue with a summary of changes\n\n"
+            "This project is managed by ph.daemon. All work is tracked as local tasks.\n\n"
+            "- Every code change must reference a task number in the commit message\n"
+            "- Use `phd create-task` to create new tasks\n\n"
             "## Constraints\n\n"
             "@docs/constraints.md\n\n"
             "## Paper\n\n"
             "The research paper lives in `paper/`. Only the paper writer agent modifies it.\n"
-            "Do not edit `paper/` directly during implementation tasks.\n"
         )
 
     # docs/constraints.md
@@ -76,9 +78,7 @@ def init(project_path: str, repo: str) -> None:
     if not constraints.exists():
         constraints.write_text(
             "# Constraints\n\n"
-            "Rules that must always be followed. Each constraint was added because the LLM\n"
-            "made a mistake or the human wants to enforce a specific approach.\n\n"
-            "<!-- Constraints are append-only. To remove one, discuss via `phd ask` first. -->\n"
+            "Rules that must always be followed.\n\n"
         )
 
     # docs/research-state.md
@@ -88,10 +88,6 @@ def init(project_path: str, repo: str) -> None:
             "# Research State\n\n"
             "Last updated: (not yet)\n\n"
             "## Current Results\n\nNo results yet.\n\n"
-            "## Paper Readiness\n\nPaper not started.\n\n"
-            "## Active Hypotheses\n\nNone yet.\n\n"
-            "## Optimization Frontier\n\nNo optimizations yet.\n\n"
-            "## Dataset Status\n\nNo dataset yet.\n\n"
             "## Next Priorities\n\nAwaiting first task.\n"
         )
 
@@ -102,60 +98,56 @@ def init(project_path: str, repo: str) -> None:
         lines.append(".ph.daemon/")
         gitignore.write_text("\n".join(lines) + "\n")
 
-    # .claude/settings.json — post-commit hook
-    settings_path = project / ".claude" / "settings.json"
-    settings: dict = {}
-    if settings_path.exists():
-        settings = json.loads(settings_path.read_text())
-    settings.setdefault("hooks", {})
-    settings["hooks"]["PostCommit"] = [
-        {
-            "command": "phd hook post-commit",
-            "description": "Update linked GitHub issue with commit discussion",
-        }
-    ]
-    settings_path.write_text(json.dumps(settings, indent=2))
-
     click.echo(f"Initialized ph.daemon project at {project}")
-    click.echo(f"  GitHub repo: {repo}")
-    click.echo(f"  Run `cd {project} && phd start` to begin")
+    click.echo(f"  Run `cd {project} && phd` to begin")
 
 
-@main.command()
-@click.option("--port", default=8666, help="Web UI port")
-def start(port: int) -> None:
-    """Start the web UI and implementor loop."""
+@main.command("create-task")
+@click.argument("title")
+@click.option("--description", "-d", default="", help="Task description")
+@click.option("--priority", "-p", default=1, type=int, help="0=human, 1=auto")
+@click.option("--depends-on", multiple=True, type=int, help="Task IDs this depends on")
+def create_task(title: str, description: str, priority: int, depends_on: tuple[int, ...]) -> None:
+    """Create a new task."""
     config = _get_config()
-    click.echo(f"Starting ph.daemon for {config.repo}")
-    click.echo(f"Web UI: http://localhost:{port}")
 
-    # Import here to avoid circular imports
-    from daemon.app import create_app
+    async def _run() -> None:
+        from daemon.db import Database
 
-    app = create_app(config)
-    uvicorn.run(app, host="127.0.0.1", port=port)
+        db = Database(config.db_path)
+        await db.init()
+        try:
+            task_id = await db.create_task(
+                title=title,
+                description=description,
+                priority=priority,
+                dependencies=list(depends_on),
+            )
+            click.echo(f"Created task #{task_id}: {title}")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
 
 
 @main.command()
 @click.argument("description")
 def task(description: str) -> None:
-    """Submit a task (opens interactive session to refine and create issues)."""
+    """Submit a task (opens interactive planner session)."""
     config = _get_config()
 
     async def _run() -> None:
         from daemon.db import Database
-        from daemon.github.issues import GitHubIssues
         from daemon.agents.planner import run_planner_interactive
 
         db = Database(config.db_path)
         await db.init()
-        gh = GitHubIssues(config=config, db=db)
 
         try:
             click.echo("Opening interactive planner session...")
-            click.echo("Refine the task, then the planner will create issues.")
-            await run_planner_interactive(config, db, gh, description)
-            click.echo("Done. Issues created. The implementor will pick them up.")
+            click.echo("Refine the task, then the planner will create subtasks.")
+            await run_planner_interactive(config, db, description)
+            click.echo("Done. Tasks created. The implementor will pick them up.")
         finally:
             await db.close()
 
@@ -177,12 +169,9 @@ def constrain(description: str) -> None:
 
         prompt = (
             f"The human wants to add a constraint: {description}\n\n"
-            "Help them refine it. When done:\n"
-            "1. Append the constraint to `docs/constraints.md` with the standard format "
-            "(numbered, dated, with rationale)\n"
-            f"2. Create a GitHub issue with label `ph:constraint` using "
-            f"`gh issue create --repo {config.repo}`\n"
-            "3. Commit the constraints.md change referencing the issue"
+            "Help them refine it. When done, append the constraint to "
+            "`docs/constraints.md` with the standard format "
+            "(numbered, dated, with rationale), then commit the change."
         )
 
         try:
@@ -239,7 +228,7 @@ def paper() -> None:
 
 @main.command()
 def status() -> None:
-    """Show agent status and issue queue."""
+    """Show agent status and task queue."""
     config = _get_config()
 
     async def _run() -> None:
@@ -249,39 +238,15 @@ def status() -> None:
         await db.init()
         try:
             running = await db.list_sessions(status="running")
-            open_issues = await db.list_issues(state="open")
+            open_tasks = await db.list_tasks(status="open")
+            in_progress = await db.list_tasks(status="in_progress")
 
-            click.echo(f"Project: {config.repo}")
             click.echo(f"Running agents: {len(running)}")
             for s in running:
                 click.echo(f"  [{s['agent_type']}] session {s['id']}"
-                          f"{' → #' + str(s['issue_id']) if s['issue_id'] else ''}")
-            click.echo(f"Open issues: {len(open_issues)}")
-        finally:
-            await db.close()
-
-    asyncio.run(_run())
-
-
-@main.group()
-def hook() -> None:
-    """Hook commands (called by Claude Code, not humans)."""
-    pass
-
-
-@hook.command("post-commit")
-def hook_post_commit() -> None:
-    """Post-commit hook: update linked GitHub issue with discussion."""
-    config = _get_config()
-
-    async def _run() -> None:
-        from daemon.db import Database
-        from daemon.github.hooks import run_post_commit_hook
-
-        db = Database(config.db_path)
-        await db.init()
-        try:
-            await run_post_commit_hook(config, db)
+                          f"{' → #' + str(s['task_id']) if s['task_id'] else ''}")
+            click.echo(f"Open tasks: {len(open_tasks)}")
+            click.echo(f"In progress: {len(in_progress)}")
         finally:
             await db.close()
 

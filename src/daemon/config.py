@@ -10,7 +10,7 @@ class ProjectConfig:
     """Configuration for a target research project."""
 
     project_dir: Path
-    repo: str  # "owner/repo" format
+    repo: str = ""
 
     @property
     def daemon_dir(self) -> Path:
@@ -37,11 +37,21 @@ class ProjectConfig:
         return self.project_dir / "docs" / "research-state.md"
 
     @classmethod
+    def discover(cls) -> ProjectConfig:
+        """Walk up from cwd to find a .ph.daemon project."""
+        current = Path.cwd()
+        while current != current.parent:
+            if (current / ".ph.daemon").exists():
+                return cls.load(current)
+            current = current.parent
+        raise FileNotFoundError("Not inside a ph.daemon project")
+
+    @classmethod
     def load(cls, project_dir: Path) -> ProjectConfig:
         """Load config from .ph.daemon/config.json."""
         config_path = project_dir / ".ph.daemon" / "config.json"
         data = json.loads(config_path.read_text())
-        return cls(project_dir=project_dir, repo=data["repo"])
+        return cls(project_dir=project_dir, repo=data.get("repo", ""))
 
     def save(self) -> None:
         """Save config to .ph.daemon/config.json."""

@@ -21,7 +21,7 @@ you write only to GitHub issues.
    - Each issue is one implementable task (fits in a single context window)
    - Issues have dependency relations via task list syntax: `- [ ] #N`
    - Each issue uses the ph.daemon issue schema (Context, Task, Dependencies, Constraints)
-   - Label each issue with `ph:ready` or `ph:blocked` as appropriate
+   - Label each issue with `phd:ready` or `phd:blocked` as appropriate
 6. Cross-reference related existing issues by editing their bodies
 
 ## Issue Sizing

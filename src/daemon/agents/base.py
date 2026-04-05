@@ -42,12 +42,12 @@ class BaseAgent:
         agent_type: AgentType,
         config: ProjectConfig,
         db: Database,
-        issue_id: int | None = None,
+        task_id: int | None = None,
     ) -> None:
         self.agent_type = agent_type
         self.config = config
         self.db = db
-        self.issue_id = issue_id
+        self.task_id = task_id
         self.session_id: str | None = None
         self._proc: asyncio.subprocess.Process | None = None
         self._log_file = None
@@ -66,7 +66,8 @@ class BaseAgent:
 
     def build_command(
         self,
-        prompt: str,
+        system_prompt: str,
+        user_prompt: str,
         interactive: bool = False,
     ) -> list[str]:
         """Build the claude CLI command."""
@@ -75,10 +76,11 @@ class BaseAgent:
             "--model", "claude-opus-4-6",
             "--max-turns", "100",
             "--dangerously-skip-permissions",
-            "--append-system-prompt", prompt,
+            "--append-system-prompt", system_prompt,
         ]
         if not interactive:
-            cmd.extend(["--print", "--output-format", "json"])
+            cmd.extend(["--verbose", "--print", "--output-format",
+                         "stream-json", user_prompt])
         return cmd
 
     async def spawn(
@@ -95,22 +97,22 @@ class BaseAgent:
         # Create session record
         self.session_id = await self.db.create_session(
             agent_type=self.agent_type.value,
-            issue_id=self.issue_id,
+            task_id=self.task_id,
             log_path=str(self.log_path),
             session_id=self.session_id,
         )
 
-        full_prompt = self._load_prompt() + "\n\n" + prompt
-        cmd = self.build_command(full_prompt, interactive=interactive)
-
+        system_prompt = self._load_prompt()
         if interactive:
-            # Interactive: connect to terminal directly
+            cmd = self.build_command(
+                system_prompt + "\n\n" + prompt, prompt, interactive=True,
+            )
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=self.config.project_dir,
             )
         else:
-            # Non-interactive: capture output to log file
+            cmd = self.build_command(system_prompt, prompt, interactive=False)
             self._log_file = open(self.log_path, "w")
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd,
