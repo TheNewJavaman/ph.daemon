@@ -33,12 +33,15 @@ async def dashboard(request: Request):
     except subprocess.CalledProcessError:
         git_log = []
 
+    director_loop = request.app.state.director_loop
+
     return templates.TemplateResponse(request, "dashboard.html", {
         "running_agents": running,
         "recent_sessions": recent[:20],
         "open_issues": open_issues,
         "recent_commits": git_log,
         "impl_paused": impl_loop.is_paused,
+        "director_paused": director_loop.is_paused,
         "repo": config.repo,
     })
 
@@ -102,6 +105,18 @@ async def pause_impl(request: Request):
 @router.post("/api/impl/resume")
 async def resume_impl(request: Request):
     request.app.state.impl_loop.resume()
+    return HTMLResponse('<span class="status running">Running</span>')
+
+
+@router.post("/api/director/pause")
+async def pause_director(request: Request):
+    request.app.state.director_loop.pause()
+    return HTMLResponse('<span class="status paused">Paused</span>')
+
+
+@router.post("/api/director/resume")
+async def resume_director(request: Request):
+    request.app.state.director_loop.resume()
     return HTMLResponse('<span class="status running">Running</span>')
 
 

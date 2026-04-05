@@ -9,32 +9,38 @@ from daemon.config import ProjectConfig
 from daemon.db import Database
 from daemon.github.issues import GitHubIssues
 from daemon.agents.implementor import ImplementorLoop
+from daemon.agents.director import DirectorLoop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize DB, start sync loop and implementor loop."""
+    """Initialize DB, start sync loop, implementor loop, and director loop."""
     config: ProjectConfig = app.state.config
     db = Database(config.db_path)
     await db.init()
 
     gh = GitHubIssues(config=config, db=db)
     impl_loop = ImplementorLoop(config=config, db=db, gh=gh)
+    director_loop = DirectorLoop(config=config, db=db, gh=gh)
 
     app.state.db = db
     app.state.gh = gh
     app.state.impl_loop = impl_loop
+    app.state.director_loop = director_loop
 
     # Start background tasks
     sync_task = asyncio.create_task(_sync_loop(gh))
     impl_task = asyncio.create_task(impl_loop.run())
+    director_task = asyncio.create_task(director_loop.run())
 
     yield
 
     # Shutdown
     impl_loop.stop()
+    director_loop.stop()
     sync_task.cancel()
     impl_task.cancel()
+    director_task.cancel()
     await db.close()
 
 

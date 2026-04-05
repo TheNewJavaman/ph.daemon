@@ -146,6 +146,13 @@ class ImplementorLoop:
             parts.append("## Active Constraints")
             parts.append(constraints)
 
+        # Include research state for broader optimization context
+        if self.config.research_state_path.exists():
+            research_state = self.config.research_state_path.read_text()
+            if research_state.strip():
+                parts.append("## Research State")
+                parts.append(research_state)
+
         return "\n".join(parts)
 
     async def _find_related_issues(self, issue: dict) -> list[dict]:

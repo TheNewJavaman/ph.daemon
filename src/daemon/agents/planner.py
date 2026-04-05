@@ -50,7 +50,8 @@ For each issue:
 1. Use the ph.daemon issue schema (Context, Task, Dependencies, Constraints sections)
 2. Add dependency links using task list syntax: `- [ ] #N`
 3. Label with `ph:ready` (no dependencies) or `ph:blocked` (has dependencies)
-4. Label with `ph:implementor`
+4. Label with `ph:human` (this is a human-requested task — takes priority over director tasks)
+5. Label with `ph:implementor`
 5. Use `--repo {config.repo}` on all gh commands
 
 If this feature is related to existing issues, edit those issues to add

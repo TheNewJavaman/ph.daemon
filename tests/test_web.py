@@ -9,6 +9,7 @@ from daemon.config import ProjectConfig
 from daemon.db import Database
 from daemon.github.issues import GitHubIssues
 from daemon.agents.implementor import ImplementorLoop
+from daemon.agents.director import DirectorLoop
 
 
 @pytest.fixture
@@ -22,9 +23,11 @@ async def client(app, config: ProjectConfig, db: Database):
     # since ASGITransport does not trigger ASGI lifespan events.
     gh = GitHubIssues(config=config, db=db)
     impl_loop = ImplementorLoop(config=config, db=db, gh=gh)
+    director_loop = DirectorLoop(config=config, db=db, gh=gh)
     app.state.db = db
     app.state.gh = gh
     app.state.impl_loop = impl_loop
+    app.state.director_loop = director_loop
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:

@@ -32,6 +32,10 @@ class ProjectConfig:
     def paper_dir(self) -> Path:
         return self.project_dir / "paper"
 
+    @property
+    def research_state_path(self) -> Path:
+        return self.project_dir / "docs" / "research-state.md"
+
     @classmethod
     def load(cls, project_dir: Path) -> ProjectConfig:
         """Load config from .ph.daemon/config.json."""

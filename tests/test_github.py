@@ -47,6 +47,20 @@ def test_resolve_dependency_dag_unblocks_when_dep_closed() -> None:
     assert [i["number"] for i in ready] == [2]
 
 
+def test_resolve_dependency_dag_human_issues_first() -> None:
+    """Human-created issues (ph:human) take priority over director-generated ones."""
+    issues = [
+        {"number": 1, "body": "", "state": "open", "assignee": None,
+         "labels": ["ph:director", "ph:ready"]},
+        {"number": 2, "body": "", "state": "open", "assignee": None,
+         "labels": ["ph:human", "ph:ready"]},
+        {"number": 3, "body": "", "state": "open", "assignee": None,
+         "labels": ["ph:director", "ph:ready"]},
+    ]
+    ready = resolve_dependency_dag(issues, set())
+    assert [i["number"] for i in ready] == [2, 1, 3]
+
+
 def test_resolve_dependency_dag_skips_assigned() -> None:
     issues = [
         {"number": 1, "body": "", "state": "open", "assignee": "bot",

@@ -23,6 +23,16 @@
             <button class="btn" hx-post="/api/impl/pause" hx-swap="outerHTML">Pause</button>
         {% endif %}
     </div>
+    <div class="card">
+        <div class="count-label">Director Loop</div>
+        {% if director_paused %}
+            <span class="status paused">Paused</span>
+            <button class="btn" hx-post="/api/director/resume" hx-swap="outerHTML">Resume</button>
+        {% else %}
+            <span class="status running">Running</span>
+            <button class="btn" hx-post="/api/director/pause" hx-swap="outerHTML">Pause</button>
+        {% endif %}
+    </div>
 </div>
 
 {% if running_agents %}

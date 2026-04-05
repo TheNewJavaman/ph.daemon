@@ -81,6 +81,20 @@ def init(project_path: str, repo: str) -> None:
             "<!-- Constraints are append-only. To remove one, discuss via `phd ask` first. -->\n"
         )
 
+    # docs/research-state.md
+    research_state = config.research_state_path
+    if not research_state.exists():
+        research_state.write_text(
+            "# Research State\n\n"
+            "Last updated: (not yet)\n\n"
+            "## Current Results\n\nNo results yet.\n\n"
+            "## Paper Readiness\n\nPaper not started.\n\n"
+            "## Active Hypotheses\n\nNone yet.\n\n"
+            "## Optimization Frontier\n\nNo optimizations yet.\n\n"
+            "## Dataset Status\n\nNo dataset yet.\n\n"
+            "## Next Priorities\n\nAwaiting first task.\n"
+        )
+
     # .gitignore
     gitignore = project / ".gitignore"
     lines = gitignore.read_text().splitlines() if gitignore.exists() else []

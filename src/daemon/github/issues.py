@@ -17,13 +17,22 @@ def parse_dependencies(body: str) -> list[int]:
     return [int(m.group(1)) for m in _DEP_PATTERN.finditer(body)]
 
 
+def _issue_priority(issue: dict) -> tuple[int, int]:
+    """Sort key: human issues first (0), then director (1), by number."""
+    labels = issue.get("labels", [])
+    if "ph:human" in labels:
+        return (0, issue["number"])
+    return (1, issue["number"])
+
+
 def resolve_dependency_dag(
     open_issues: list[dict],
     closed_numbers: set[int],
 ) -> list[dict]:
     """Return open, unassigned issues whose dependencies are all closed.
 
-    Results are ordered by issue number (oldest first).
+    Results are ordered by priority: ph:human first, then ph:director,
+    then by issue number (oldest first) within each priority tier.
     """
     ready = []
     for issue in open_issues:
@@ -32,7 +41,7 @@ def resolve_dependency_dag(
         deps = parse_dependencies(issue.get("body", ""))
         if all(d in closed_numbers for d in deps):
             ready.append(issue)
-    return sorted(ready, key=lambda i: i["number"])
+    return sorted(ready, key=_issue_priority)
 
 
 @dataclass

@@ -16,6 +16,7 @@ class AgentType(enum.StrEnum):
     IMPLEMENTOR = "implementor"
     PAPER = "paper"
     EPHEMERAL = "ephemeral"
+    DIRECTOR = "director"
 
 
 # Prompt file basenames per agent type
@@ -24,6 +25,7 @@ _PROMPT_FILES = {
     AgentType.IMPLEMENTOR: "implementor.md",
     AgentType.PAPER: "paper.md",
     AgentType.EPHEMERAL: "ephemeral.md",
+    AgentType.DIRECTOR: "director.md",
 }
 
 
