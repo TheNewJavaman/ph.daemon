@@ -307,9 +307,10 @@ Constraints are numbered, dated, linked to an issue, and include rationale.
 
 ## Data Model
 
-### SQLite (`.ph.daemon/daemon.db`) — local state only
+### SQLite (`.ph.daemon/daemon.db`)
 
 ```sql
+-- Purely local state — no GitHub equivalent
 sessions (
     id          TEXT PRIMARY KEY,    -- uuid
     agent_type  TEXT NOT NULL,       -- planner | implementor | paper | ephemeral
@@ -320,19 +321,39 @@ sessions (
     started_at  TEXT NOT NULL,
     ended_at    TEXT
 )
+
+-- Write-through cache of GitHub issues (denormalized for fast context assembly)
+issues (
+    number      INTEGER PRIMARY KEY,
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    state       TEXT NOT NULL,       -- open | closed
+    labels      TEXT NOT NULL,       -- JSON array
+    assignee    TEXT,
+    comments    TEXT NOT NULL,       -- JSON array of {author, body, created_at}
+    synced_at   TEXT NOT NULL
+)
 ```
 
-This is the only table. Sessions are purely local state with no GitHub equivalent.
+### Why mirror issues locally
+
+The memoization system requires fast cross-issue queries with full comment
+history. At scale (200+ issues, 3000+ comments), assembling context for the
+implementor's prompt via API calls adds seconds of latency per issue pickup.
+Denormalizing issue + comments into a single row makes context assembly a
+single SQL query.
+
+**Write-through cache semantics:**
+- All writes go to GitHub first, then update local
+- Reads hit local (instant)
+- Periodic sync (every 60s) refreshes from GitHub
+- Local is always eventually consistent
 
 ### Everything else comes from authoritative sources
 
-- **Issues:** GitHub API via `gh` CLI, cached in-memory with 30s TTL
-- **Commits:** `git log`, authoritative and fast
+- **Commits:** `git log` — authoritative and fast
 - **Constraints:** Parsed from `docs/constraints.md` on demand
-- **Dependency graph:** Parsed from GitHub issue task lists on each resolution
-
-GitHub API rate limit is 5000 req/hr authenticated. A single-user tool polling
-every 5s uses ~720 req/hr — well within budget. No local mirror needed.
+- **Dependency graph:** Parsed from issue body task lists (local cache)
 
 ## Web UI (Control Plane)
 
