@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Agents — ph.daemon{% endblock %}
+{% block content %}
+<h2>Agent Sessions</h2>
+<table>
+    <tr><th>Session</th><th>Type</th><th>Issue</th><th>Status</th><th>Started</th></tr>
+    {% for s in sessions %}
+    <tr>
+        <td><a href="/agents/{{ s.id }}">{{ s.id }}</a></td>
+        <td>{{ s.agent_type }}</td>
+        <td>{% if s.issue_id %}#{{ s.issue_id }}{% else %}—{% endif %}</td>
+        <td><span class="status {{ s.status }}">{{ s.status }}</span></td>
+        <td>{{ s.started_at[:19] }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}
