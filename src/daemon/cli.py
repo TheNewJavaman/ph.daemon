@@ -12,19 +12,71 @@ from daemon.config import ProjectConfig
 logger = logging.getLogger(__name__)
 
 
+def _ensure_init(project: Path) -> None:
+    """Initialize .phd/ if it doesn't exist. Idempotent."""
+    config = ProjectConfig(project_dir=project)
+
+    config.daemon_dir.mkdir(parents=True, exist_ok=True)
+    config.logs_dir.mkdir(parents=True, exist_ok=True)
+    (project / "docs").mkdir(parents=True, exist_ok=True)
+    config.paper_dir.mkdir(parents=True, exist_ok=True)
+
+    config.save()
+
+    phd_gitignore = config.daemon_dir / ".gitignore"
+    if not phd_gitignore.exists():
+        phd_gitignore.write_text("*\n")
+
+    claude_md = project / "CLAUDE.md"
+    if not claude_md.exists():
+        claude_md.write_text(
+            "# Research Project\n\n"
+            "## Daemon\n\n"
+            "This project is managed by ph.daemon. All work is tracked as local tasks.\n\n"
+            "- Every code change must reference a task number in the commit message\n"
+            "- Use `phd create-task` to create new tasks\n\n"
+            "## Constraints\n\n"
+            "@docs/constraints.md\n\n"
+            "## Paper\n\n"
+            "The research paper lives in `paper/`. Only the paper writer agent modifies it.\n"
+        )
+
+    constraints = config.constraints_path
+    if not constraints.exists():
+        constraints.write_text(
+            "# Constraints\n\n"
+            "Rules that must always be followed.\n\n"
+        )
+
+    research_state = config.research_state_path
+    if not research_state.exists():
+        research_state.write_text(
+            "# Research State\n\n"
+            "Last updated: (not yet)\n\n"
+            "## Current Results\n\nNo results yet.\n\n"
+            "## Next Priorities\n\nAwaiting first task.\n"
+        )
+
+    gitignore = project / ".gitignore"
+    lines = gitignore.read_text().splitlines() if gitignore.exists() else []
+    if ".phd/" not in lines:
+        lines.append(".phd/")
+        gitignore.write_text("\n".join(lines) + "\n")
+
+
 def _find_project_dir() -> Path:
-    """Walk up from cwd to find a .ph.daemon directory."""
+    """Walk up from cwd to find a .phd directory, or use cwd."""
     current = Path.cwd()
     while current != current.parent:
-        if (current / ".ph.daemon").exists():
+        if (current / ".phd").exists():
             return current
         current = current.parent
-    click.echo("Error: not inside a ph.daemon project. Run `phd init` first.", err=True)
-    sys.exit(1)
+    return Path.cwd()
 
 
 def _get_config() -> ProjectConfig:
     project_dir = _find_project_dir()
+    _ensure_init(project_dir)
     return ProjectConfig.load(project_dir)
 
 
@@ -44,62 +96,28 @@ def main(ctx: click.Context) -> None:
             os.system("stty sane 2>/dev/null; tput reset 2>/dev/null")
 
 
-@main.command()
-@click.argument("project_path", type=click.Path(), default=".")
-def init(project_path: str) -> None:
-    """Initialize a new research project."""
-    project = Path(project_path).resolve()
-    config = ProjectConfig(project_dir=project)
+@main.command("reset-task")
+@click.argument("task_id", type=int)
+def reset_task(task_id: int) -> None:
+    """Reset a failed/in-progress task back to open."""
+    config = _get_config()
 
-    config.daemon_dir.mkdir(parents=True, exist_ok=True)
-    config.logs_dir.mkdir(parents=True, exist_ok=True)
-    (project / "docs").mkdir(parents=True, exist_ok=True)
-    config.paper_dir.mkdir(parents=True, exist_ok=True)
+    async def _run() -> None:
+        from daemon.db import Database
 
-    config.save()
+        db = Database(config.db_path)
+        await db.init()
+        try:
+            task = await db.get_task(task_id)
+            if not task:
+                click.echo(f"Task #{task_id} not found", err=True)
+                return
+            await db.update_task(task_id, status="open")
+            click.echo(f"Task #{task_id} reset to open")
+        finally:
+            await db.close()
 
-    # CLAUDE.md
-    claude_md = project / "CLAUDE.md"
-    if not claude_md.exists():
-        claude_md.write_text(
-            "# Research Project\n\n"
-            "## Daemon\n\n"
-            "This project is managed by ph.daemon. All work is tracked as local tasks.\n\n"
-            "- Every code change must reference a task number in the commit message\n"
-            "- Use `phd create-task` to create new tasks\n\n"
-            "## Constraints\n\n"
-            "@docs/constraints.md\n\n"
-            "## Paper\n\n"
-            "The research paper lives in `paper/`. Only the paper writer agent modifies it.\n"
-        )
-
-    # docs/constraints.md
-    constraints = config.constraints_path
-    if not constraints.exists():
-        constraints.write_text(
-            "# Constraints\n\n"
-            "Rules that must always be followed.\n\n"
-        )
-
-    # docs/research-state.md
-    research_state = config.research_state_path
-    if not research_state.exists():
-        research_state.write_text(
-            "# Research State\n\n"
-            "Last updated: (not yet)\n\n"
-            "## Current Results\n\nNo results yet.\n\n"
-            "## Next Priorities\n\nAwaiting first task.\n"
-        )
-
-    # .gitignore
-    gitignore = project / ".gitignore"
-    lines = gitignore.read_text().splitlines() if gitignore.exists() else []
-    if ".ph.daemon/" not in lines:
-        lines.append(".ph.daemon/")
-        gitignore.write_text("\n".join(lines) + "\n")
-
-    click.echo(f"Initialized ph.daemon project at {project}")
-    click.echo(f"  Run `cd {project} && phd` to begin")
+    asyncio.run(_run())
 
 
 @main.command("create-task")
@@ -147,7 +165,7 @@ def task(description: str) -> None:
             click.echo("Opening interactive planner session...")
             click.echo("Refine the task, then the planner will create subtasks.")
             await run_planner_interactive(config, db, description)
-            click.echo("Done. Tasks created. The implementor will pick them up.")
+            click.echo("Done. Tasks created. The engineer will pick them up.")
         finally:
             await db.close()
 

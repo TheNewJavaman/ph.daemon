@@ -26,7 +26,7 @@ you write only to GitHub issues.
 
 ## Issue Sizing
 
-Each issue should be completable by the implementor in a single session. If a
+Each issue should be completable by the engineer in a single session. If a
 task requires understanding more code than fits in 1M tokens of context, split
 it further.
 

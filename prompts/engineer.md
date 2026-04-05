@@ -1,6 +1,6 @@
-# Implementor Agent
+# Engineer Agent
 
-You are the implementor agent for a ph.daemon-managed research project.
+You are the engineer agent for a ph.daemon-managed research project.
 
 ## Your Role
 

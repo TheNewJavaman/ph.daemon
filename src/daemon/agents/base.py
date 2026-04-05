@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
 import signal
 import uuid
 from datetime import datetime, timezone
@@ -13,19 +14,19 @@ from daemon.db import Database
 
 class AgentType(enum.StrEnum):
     PLANNER = "planner"
-    IMPLEMENTOR = "implementor"
+    ENGINEER = "engineer"
     PAPER = "paper"
     EPHEMERAL = "ephemeral"
-    DIRECTOR = "director"
+    RESEARCHER = "researcher"
 
 
 # Prompt file basenames per agent type
 _PROMPT_FILES = {
     AgentType.PLANNER: "planner.md",
-    AgentType.IMPLEMENTOR: "implementor.md",
+    AgentType.ENGINEER: "engineer.md",
     AgentType.PAPER: "paper.md",
     AgentType.EPHEMERAL: "ephemeral.md",
-    AgentType.DIRECTOR: "director.md",
+    AgentType.RESEARCHER: "researcher.md",
 }
 
 
@@ -69,15 +70,18 @@ class BaseAgent:
         system_prompt: str,
         user_prompt: str,
         interactive: bool = False,
+        resume_session: str | None = None,
     ) -> list[str]:
         """Build the claude CLI command."""
-        cmd = [
-            "claude",
+        cmd = ["claude"]
+        if resume_session:
+            cmd.extend(["--resume", resume_session])
+        cmd.extend([
             "--model", "claude-opus-4-6",
             "--max-turns", "100",
             "--dangerously-skip-permissions",
             "--append-system-prompt", system_prompt,
-        ]
+        ])
         if not interactive:
             cmd.extend(["--verbose", "--print", "--output-format",
                          "stream-json", user_prompt])
@@ -87,6 +91,7 @@ class BaseAgent:
         self,
         prompt: str,
         interactive: bool = False,
+        resume_session: str | None = None,
     ) -> str:
         """Spawn a claude subprocess and track it in the database."""
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -105,14 +110,18 @@ class BaseAgent:
         system_prompt = self._load_prompt()
         if interactive:
             cmd = self.build_command(
-                system_prompt + "\n\n" + prompt, prompt, interactive=True,
+                system_prompt + "\n\n" + prompt, prompt,
+                interactive=True, resume_session=resume_session,
             )
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=self.config.project_dir,
             )
         else:
-            cmd = self.build_command(system_prompt, prompt, interactive=False)
+            cmd = self.build_command(
+                system_prompt, prompt,
+                interactive=False, resume_session=resume_session,
+            )
             self._log_file = open(self.log_path, "w")
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -128,6 +137,21 @@ class BaseAgent:
         if self._log_file is not None:
             self._log_file.close()
             self._log_file = None
+
+    def get_claude_session_id(self) -> str | None:
+        """Extract Claude's session ID from the log file."""
+        try:
+            with open(self.log_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if "session_id" in data:
+                        return data["session_id"]
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        return None
 
     async def wait(self) -> int:
         """Wait for the subprocess to finish. Returns exit code."""

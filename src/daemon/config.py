@@ -14,7 +14,7 @@ class ProjectConfig:
 
     @property
     def daemon_dir(self) -> Path:
-        return self.project_dir / ".ph.daemon"
+        return self.project_dir / ".phd"
 
     @property
     def db_path(self) -> Path:
@@ -38,23 +38,23 @@ class ProjectConfig:
 
     @classmethod
     def discover(cls) -> ProjectConfig:
-        """Walk up from cwd to find a .ph.daemon project."""
+        """Walk up from cwd to find a .phd project."""
         current = Path.cwd()
         while current != current.parent:
-            if (current / ".ph.daemon").exists():
+            if (current / ".phd").exists():
                 return cls.load(current)
             current = current.parent
         raise FileNotFoundError("Not inside a ph.daemon project")
 
     @classmethod
     def load(cls, project_dir: Path) -> ProjectConfig:
-        """Load config from .ph.daemon/config.json."""
-        config_path = project_dir / ".ph.daemon" / "config.json"
+        """Load config from .phd/config.json."""
+        config_path = project_dir / ".phd" / "config.json"
         data = json.loads(config_path.read_text())
         return cls(project_dir=project_dir, repo=data.get("repo", ""))
 
     def save(self) -> None:
-        """Save config to .ph.daemon/config.json."""
+        """Save config to .phd/config.json."""
         config_path = self.daemon_dir / "config.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps({"repo": self.repo}, indent=2))

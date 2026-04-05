@@ -10,6 +10,7 @@ Each cycle:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import subprocess
 
@@ -43,15 +44,19 @@ class Orchestrator:
         logger.info("Orchestrator resumed")
 
     async def stop(self) -> None:
-        """Gracefully stop: kill current agent, reset its task to open."""
+        """Gracefully stop: kill current agent, save session for resume."""
         self._running = False
         if self._current_agent:
             logger.info("Stopping current agent gracefully...")
+            claude_sid = self._current_agent.get_claude_session_id()
             await self._current_agent.kill()
-            # Reset the task so it gets picked up on restart
             if self._current_task_id:
-                await self.db.update_task(self._current_task_id, status="open")
-                logger.info(f"Task #{self._current_task_id} reset to open")
+                await self.db.update_task(
+                    self._current_task_id,
+                    status="interrupted",
+                    claude_session=claude_sid,
+                )
+                logger.info(f"Task #{self._current_task_id} interrupted (session saved)")
 
     async def run(self) -> None:
         self._running = True
@@ -70,62 +75,80 @@ class Orchestrator:
 
     async def _cycle(self) -> None:
         """One orchestrator cycle: decide what to do and do it."""
-        # Check for a task to implement first
         task = await self.db.pick_next_task()
         if task:
-            await self._implement(task)
-            return
+            await self._engineer(task)
+        else:
+            await self._research()
 
-        # No ready tasks — check if we should create some
-        open_tasks = await self.db.list_tasks(status="open")
-        in_progress = await self.db.list_tasks(status="in_progress")
-        if len(open_tasks) + len(in_progress) <= 3:
-            await self._direct()
+        # Update activity summary in background (non-blocking)
+        asyncio.create_task(self._update_activity())
 
-    async def _implement(self, task: dict) -> None:
-        """Implement a single task."""
+    async def _engineer(self, task: dict) -> None:
+        """Implement a single task, or resume an interrupted one."""
         task_id = task["id"]
-        logger.info(f"Implementing task #{task_id}: {task['title']}")
+        resume_session = task.get("claude_session")
+        resuming = task["status"] == "interrupted" and resume_session
+
+        if resuming:
+            logger.info(f"Resuming task #{task_id}: {task['title']}")
+            prompt = "Continue where you left off. Check the current state of your work and proceed."
+        else:
+            logger.info(f"Implementing task #{task_id}: {task['title']}")
+            prompt = self._build_engineer_prompt(task)
+
         await self.db.update_task(task_id, status="in_progress")
         self._current_task_id = task_id
 
-        prompt = self._build_impl_prompt(task)
-
         agent = BaseAgent(
-            agent_type=AgentType.IMPLEMENTOR,
+            agent_type=AgentType.ENGINEER,
             config=self.config,
             db=self.db,
             task_id=task_id,
         )
         self._current_agent = agent
-        self._current_session = await agent.spawn(prompt, interactive=False)
+        self._current_session = await agent.spawn(
+            prompt, interactive=False,
+            resume_session=resume_session if resuming else None,
+        )
         exit_code = await agent.wait()
+
+        # Capture Claude's session ID for potential resumption
+        claude_sid = agent.get_claude_session_id()
+
         self._current_agent = None
         self._current_session = None
         self._current_task_id = None
 
         if exit_code == 0:
-            await self.db.update_task(task_id, status="completed")
+            await self.db.update_task(task_id, status="completed", claude_session=None)
+        elif exit_code < 0 or not self._running:
+            # Killed by signal or orchestrator shutting down — save session for resume
+            await self.db.update_task(task_id, status="interrupted", claude_session=claude_sid)
+            logger.info(f"Task #{task_id} interrupted (session saved for resume)")
         else:
-            await self.db.update_task(task_id, status="failed")
+            await self.db.update_task(task_id, status="failed", claude_session=claude_sid)
             logger.warning(f"Task #{task_id} failed (exit {exit_code})")
 
-    async def _direct(self) -> None:
+    async def _research(self) -> None:
         """Analyze state and create new tasks."""
         logger.info("Generating new tasks...")
 
-        context = await self._build_director_context()
+        # Clear any stale drop file
+        drop_file = self.config.daemon_dir / "new_tasks.json"
+        drop_file.unlink(missing_ok=True)
+
+        context = await self._build_researcher_context()
         prompt = (
             "Analyze the following research state and create 2-3 tasks "
-            "for the highest-value next work. Use `phd create-task` to create "
-            "each task.\n\n"
+            "by writing them to `.phd/new_tasks.json`.\n\n"
             + (context or "No prior work exists. This is a new project. "
                "Read the codebase to understand what it does, then create "
                "initial tasks.")
         )
 
         agent = BaseAgent(
-            agent_type=AgentType.DIRECTOR,
+            agent_type=AgentType.RESEARCHER,
             config=self.config,
             db=self.db,
             task_id=None,
@@ -137,10 +160,35 @@ class Orchestrator:
         self._current_session = None
 
         if exit_code != 0:
-            logger.warning(f"Director failed (exit {exit_code})")
+            logger.warning(f"Researcher failed (exit {exit_code})")
 
-    def _build_impl_prompt(self, task: dict) -> str:
-        """Build context for an implementor agent."""
+        # Import tasks from drop file
+        await self._import_tasks(drop_file)
+
+    async def _import_tasks(self, path) -> None:
+        """Read tasks from a JSON drop file and create them in the DB."""
+        if not path.exists():
+            return
+        try:
+            tasks = json.loads(path.read_text())
+            if not isinstance(tasks, list):
+                tasks = [tasks]
+            for t in tasks:
+                if not isinstance(t, dict) or "title" not in t:
+                    continue
+                task_id = await self.db.create_task(
+                    title=t["title"],
+                    description=t.get("description", ""),
+                    dependencies=t.get("depends_on", []),
+                )
+                logger.info(f"Imported task #{task_id}: {t['title']}")
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Failed to parse new_tasks.json: {e}")
+        finally:
+            path.unlink(missing_ok=True)
+
+    def _build_engineer_prompt(self, task: dict) -> str:
+        """Build context for an engineer agent."""
         # Include any unread human messages as directives
         parts = [
             f"## Current Task: #{task['id']}",
@@ -165,17 +213,9 @@ class Orchestrator:
 
         return "\n".join(parts)
 
-    async def _build_director_context(self) -> str:
-        """Build context for the director agent."""
+    async def _build_researcher_context(self) -> str:
+        """Build context for the researcher agent."""
         parts = []
-
-        # Human messages
-        messages = await self.db.read_messages()
-        if messages:
-            parts.append("## Human Messages")
-            for m in messages:
-                parts.append(f"- {m['content']}")
-            parts.append("")
 
         if self.config.research_state_path.exists():
             state = self.config.research_state_path.read_text()
@@ -226,3 +266,53 @@ class Orchestrator:
             pass
 
         return "\n".join(parts)
+
+    async def _update_activity(self) -> None:
+        """Generate an LLM-written activity summary for the dashboard."""
+        try:
+            git_log = ""
+            try:
+                git_log = subprocess.check_output(
+                    ["git", "log", "--oneline", "-15", "--no-merges"],
+                    cwd=self.config.project_dir,
+                ).decode().strip()
+            except subprocess.CalledProcessError:
+                pass
+
+            completed = await self.db.list_tasks(status="completed")
+            in_progress = await self.db.list_tasks(status="in_progress")
+            failed = await self.db.list_tasks(status="failed")
+
+            task_lines = []
+            for t in completed[-10:]:
+                task_lines.append(f"- [completed] #{t['id']}: {t['title']}")
+            for t in in_progress:
+                task_lines.append(f"- [in progress] #{t['id']}: {t['title']}")
+            for t in failed[-5:]:
+                task_lines.append(f"- [failed] #{t['id']}: {t['title']}")
+
+            if not git_log and not task_lines:
+                return
+
+            prompt = (
+                "Write a concise activity summary (5-8 bullet points) for a "
+                "research project dashboard. Focus on what was accomplished and "
+                "what's in flight. Be specific. No headers, just bullets.\n\n"
+                f"## Recent Commits\n{git_log or 'None'}\n\n"
+                f"## Task Activity\n" + ("\n".join(task_lines) or "None")
+            )
+
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "--print", "--model", "claude-haiku-4-5-20251001",
+                "--max-turns", "1", prompt,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=self.config.project_dir,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+
+            if proc.returncode == 0 and stdout:
+                activity_path = self.config.daemon_dir / "activity.md"
+                activity_path.write_text(stdout.decode().strip())
+        except Exception:
+            logger.debug("Activity summary update failed", exc_info=True)

@@ -14,7 +14,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.theme import Theme
 from textual.widgets import (
-    DataTable, Footer, Header, Input, Label, ListItem, ListView, RichLog, Static,
+    DataTable, Footer, Header, Label, ListItem, ListView, RichLog, Static,
 )
 
 from daemon.config import ProjectConfig
@@ -67,7 +67,7 @@ def _format_log_line(raw: str) -> Text | None:
         text = " ".join(texts)
         if len(text) > 200:
             text = text[:200] + "…"
-        return Text(f"▶ {text}", style="dim italic") if text else None
+        return Text(f"▶ {text}", style="italic #71717a") if text else None
 
     if t == "assistant":
         msg = data.get("message", {})
@@ -82,8 +82,8 @@ def _format_log_line(raw: str) -> Text | None:
             elif bt == "tool_use":
                 name = b.get("name", "?")
                 summary = _tool_summary(name, b.get("input", {}))
-                result.append(f"▸ {name}", style="bold magenta")
-                result.append(f" {summary}\n", style="dim")
+                result.append(f"▸ {name}", style="bold #a855f7")
+                result.append(f" {summary}\n", style="#71717a")
         return result if result.plain.strip() else None
 
     if t == "tool":
@@ -101,14 +101,14 @@ def _format_log_line(raw: str) -> Text | None:
                 content = "\n".join(lines[:5]) + f"\n… ({len(lines) - 5} more lines)"
             elif len(content) > 300:
                 content = content[:300] + "…"
-        return Text(f"◂ {content}", style="dim")
+        return Text(f"◂ {content}", style="#52525b")
 
     if t == "result":
         cost = data.get("cost_usd", 0)
         turns = data.get("num_turns", "?")
         is_error = data.get("is_error", False)
         lbl = "Error" if is_error else "Completed"
-        style = "red bold" if is_error else "green bold"
+        style = "bold #ef4444" if is_error else "bold #22c55e"
         return Text(f"── {lbl} ({turns} turns, ${cost:.4f}) ──", style=style)
 
     return None
@@ -122,6 +122,39 @@ def _humantime(value: str | None) -> str:
         return dt.strftime("%b %-d, %-I:%M %p")
     except (ValueError, TypeError):
         return value
+
+
+_STATUS_GLYPHS = {
+    "running":     "● running",
+    "in_progress": "● in progress",
+    "open":        "○ open",
+    "completed":   "✓ completed",
+    "failed":      "✗ failed",
+    "interrupted": "◑ interrupted",
+    "killed":      "✗ killed",
+}
+
+_STATUS_STYLES = {
+    "running":     "#22c55e",
+    "in_progress": "#22c55e",
+    "open":        "#a1a1aa",
+    "completed":   "#a855f7",
+    "failed":      "#ef4444",
+    "interrupted": "#f59e0b",
+    "killed":      "#ef4444",
+}
+
+
+def _status(status: str) -> Text:
+    label = _STATUS_GLYPHS.get(status, f"? {status}")
+    style = _STATUS_STYLES.get(status, "")
+    return Text(label, style=style)
+
+
+def _status_markup(status: str) -> str:
+    label = _STATUS_GLYPHS.get(status, f"? {status}")
+    color = _STATUS_STYLES.get(status, "")
+    return f"[{color}]{label}[/]" if color else label
 
 
 # --- Session log viewer ---
@@ -141,7 +174,7 @@ class SessionScreen(Screen):
         yield Static(
             f"[bold]{s['agent_type']}[/] session {s['id']}  "
             f"Task: {'#' + str(s['task_id']) if s['task_id'] else '—'}  "
-            f"Status: {s['status']}  "
+            f"{_status_markup(s['status'])}  "
             f"Started: {_humantime(s['started_at'])}",
         )
         yield RichLog(id="log", highlight=True, markup=False)
@@ -154,7 +187,7 @@ class SessionScreen(Screen):
         log_widget = self.query_one("#log", RichLog)
         path = Path(self.session["log_path"])
         if not path.exists():
-            log_widget.write(Text("Log file not found.", style="red"))
+            log_widget.write(Text("Log file not found.", style="#ef4444"))
             return
         with open(path) as f:
             while True:
@@ -173,75 +206,143 @@ class SessionScreen(Screen):
 # --- Main application ---
 
 
-_PHD_THEME = Theme(
-    name="phd",
-    primary="ansi_blue",
-    secondary="ansi_cyan",
-    warning="ansi_yellow",
-    error="ansi_red",
-    success="ansi_green",
-    accent="ansi_magenta",
-    foreground="ansi_default",
-    background="ansi_default",
-    surface="ansi_default",
-    panel="ansi_default",
-    boost="ansi_default",
+PHD_DARK = Theme(
+    name="phd-dark",
+    primary="#a855f7",
+    secondary="#7c3aed",
+    warning="#f59e0b",
+    error="#ef4444",
+    success="#22c55e",
+    accent="#a855f7",
+    foreground="#d4d4d8",
+    background="#09090b",
+    surface="#09090b",
+    panel="#111113",
+    boost="#1a1a1f",
     dark=True,
     variables={
-        "input-selection-background": "ansi_blue",
+        "border": "#27272a",
+        "border-blurred": "#1c1c1f",
+        "scrollbar": "#27272a",
+        "scrollbar-hover": "#a855f7",
+        "input-selection-background": "#7c3aed40",
         "input-cursor-text-style": "reverse",
-        "scrollbar": "ansi_bright_black",
-        "border": "ansi_bright_black",
-        "border-blurred": "ansi_bright_black",
+    },
+)
+
+PHD_LIGHT = Theme(
+    name="phd-light",
+    primary="#7c3aed",
+    secondary="#a855f7",
+    warning="#d97706",
+    error="#dc2626",
+    success="#16a34a",
+    accent="#7c3aed",
+    foreground="#18181b",
+    background="#fafafa",
+    surface="#fafafa",
+    panel="#f4f4f5",
+    boost="#e4e4e7",
+    dark=False,
+    variables={
+        "border": "#d4d4d8",
+        "border-blurred": "#e4e4e7",
+        "scrollbar": "#d4d4d8",
+        "scrollbar-hover": "#7c3aed",
+        "input-selection-background": "#7c3aed30",
+        "input-cursor-text-style": "reverse",
     },
 )
 
 
 class DaemonApp(App):
     TITLE = "ph.daemon"
-    theme = "phd"
 
     CSS = """
-    Screen { background: ansi_default; color: ansi_default; }
+    * {
+        scrollbar-size: 1 1;
+        scrollbar-background: $surface;
+        scrollbar-color: $panel;
+        scrollbar-color-hover: $accent;
+        scrollbar-color-active: $accent;
+    }
+
+    Screen { background: $surface; color: $foreground; }
+
+    /* --- Sidebar --- */
     #sidebar {
         width: 24; dock: left;
-        background: ansi_black; border-right: solid ansi_bright_black;
+        background: $panel;
         padding: 1 0;
     }
     #sidebar-title {
-        color: ansi_magenta; text-style: bold;
+        color: $accent; text-style: bold;
         padding: 0 2; margin-bottom: 1;
     }
     #nav { background: transparent; }
-    #nav > ListItem { color: ansi_bright_black; padding: 0 2; }
-    #nav > ListItem.-highlight { background: ansi_default; color: ansi_default; }
-    #content { padding: 1 2; }
-    #status-bar { height: auto; margin-bottom: 1; color: ansi_default; }
-    DataTable { height: 1fr; background: ansi_default; }
-    DataTable > .datatable--header { color: ansi_bright_black; text-style: bold; }
-    DataTable > .datatable--cursor { background: ansi_bright_black; color: ansi_white; }
-    #detail { margin-top: 1; height: auto; color: ansi_bright_black; }
-    #msg-input {
-        dock: bottom; margin-top: 1;
-        background: ansi_black; color: ansi_default;
-        border: solid ansi_bright_black;
+    #nav > ListItem {
+        padding: 0 2; color: $text-muted;
+        background: transparent;
     }
-    Header { background: ansi_black; color: ansi_magenta; }
-    Footer { background: ansi_black; color: ansi_bright_black; }
-    FooterKey { background: ansi_black; color: ansi_bright_black; }
-    FooterKey:hover { background: ansi_bright_black; }
-    FooterKey.-compact .footer-key--key { color: ansi_magenta; }
-    RichLog { background: ansi_black; border: solid ansi_bright_black; }
+    #nav > ListItem.-highlight {
+        background: $boost; color: $text;
+    }
+    ListView { background: transparent; }
+    ListView:focus { background: transparent; }
+
+    /* --- Content --- */
+    #content { padding: 1 2; }
+    #status-bar { height: auto; margin-bottom: 1; }
+
+    /* --- DataTable --- */
+    DataTable {
+        height: 1fr;
+        max-height: 50%;
+        background: $surface;
+    }
+    DataTable > .datatable--header {
+        color: $text-muted; text-style: bold;
+        background: $surface;
+    }
+    DataTable > .datatable--cursor {
+        background: $accent; color: $surface;
+    }
+    DataTable:focus > .datatable--cursor {
+        background: $accent; color: $surface;
+    }
+
+    /* --- Detail pane --- */
+    #detail-title { height: auto; margin-top: 1; color: $text-muted; }
+    #detail-pane {
+        height: 1fr; min-height: 5;
+        background: $panel; border: solid $border;
+    }
+
+    /* --- Header / Footer --- */
+    Header { background: $panel; color: $accent; }
+    HeaderTitle { color: $accent; text-style: bold; background: $panel; }
+    Footer { background: $panel; color: $text-muted; }
+    FooterKey { background: $panel; color: $text-muted; }
+    FooterKey:hover { background: $boost; }
+    FooterKey.-compact .footer-key--key { color: $accent; background: $panel; }
+    FooterKey.-compact .footer-key--description { color: $text-muted; background: $panel; }
+
+    /* --- Log viewer --- */
+    RichLog { background: $panel; border: solid $border; }
+    .session-meta { color: $text-muted; margin-bottom: 1; }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("p", "toggle_pause", "Pause/Resume"),
+        Binding("t", "toggle_theme", "Theme"),
     ]
 
     def __init__(self, config: ProjectConfig):
         super().__init__()
-        self.register_theme(_PHD_THEME)
+        self.register_theme(PHD_DARK)
+        self.register_theme(PHD_LIGHT)
+        self.theme = "phd-dark"
         self.config = config
         self.db: Database | None = None
         self.orchestrator: Orchestrator | None = None
@@ -263,11 +364,8 @@ class DaemonApp(App):
             with Vertical(id="content"):
                 yield Static(id="status-bar")
                 yield DataTable(id="main-table", cursor_type="row")
-                yield Static(id="detail", markup=True)
-                yield Input(
-                    placeholder="Message the orchestrator...",
-                    id="msg-input",
-                )
+                yield Static(id="detail-title", markup=True)
+                yield RichLog(id="detail-pane", wrap=True)
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -282,9 +380,6 @@ class DaemonApp(App):
                 f"Recovered: {stale} sessions, {recovered} tasks reset to open"
             )
 
-        # Check for auto-stash from previous exit
-        self._check_git_stash()
-
         self.orchestrator = Orchestrator(config=self.config, db=self.db)
         self._bg_task = asyncio.create_task(self.orchestrator.run())
 
@@ -298,56 +393,9 @@ class DaemonApp(App):
         if self._bg_task:
             self._bg_task.cancel()
 
-        # Stash dirty working tree so the project is clean
-        self._git_stash_if_dirty()
-
         if self.db:
             await self.db.mark_stale_running()
             await self.db.close()
-
-    def _git_stash_if_dirty(self) -> None:
-        """Stash uncommitted changes so the repo is left clean."""
-        try:
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=self.config.project_dir,
-                capture_output=True, text=True,
-            )
-            if status.stdout.strip():
-                subprocess.run(
-                    ["git", "stash", "push", "--include-untracked",
-                     "-m", "phd: auto-stash on exit"],
-                    cwd=self.config.project_dir,
-                    capture_output=True,
-                )
-        except FileNotFoundError:
-            pass
-
-    def _check_git_stash(self) -> None:
-        """Notify if there's an auto-stash from a previous session."""
-        try:
-            result = subprocess.run(
-                ["git", "stash", "list"],
-                cwd=self.config.project_dir,
-                capture_output=True, text=True,
-            )
-            for line in result.stdout.splitlines():
-                if "phd: auto-stash on exit" in line:
-                    self.notify(
-                        f"Found stashed changes from previous session. "
-                        f"Run `git stash pop` to restore.",
-                        timeout=10,
-                    )
-                    break
-        except FileNotFoundError:
-            pass
-
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        msg = event.value.strip()
-        if msg and self.db:
-            await self.db.send_message(msg)
-            event.input.value = ""
-            self.notify(f"Sent: {msg[:50]}")
 
     def action_toggle_pause(self) -> None:
         if self.orchestrator:
@@ -358,7 +406,16 @@ class DaemonApp(App):
                 self.orchestrator.pause()
                 self.notify("Orchestrator paused")
 
+    def action_toggle_theme(self) -> None:
+        self.theme = "phd-light" if self.theme == "phd-dark" else "phd-dark"
+
+    def _cancel_detail_worker(self) -> None:
+        if hasattr(self, "_detail_worker") and self._detail_worker is not None:
+            self._detail_worker.cancel()
+            self._detail_worker = None
+
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
+        self._cancel_detail_worker()
         handlers = {
             "nav-dashboard": self._show_dashboard,
             "nav-tasks": self._show_tasks,
@@ -369,8 +426,95 @@ class DaemonApp(App):
         if handler:
             await handler()
 
+    async def on_data_table_cursor_moved(self, event: DataTable.CursorMoved) -> None:
+        """Populate the detail pane when cursor moves over a row."""
+        row_key = event.row_key
+        if not row_key:
+            return
+
+        key = str(row_key.value)
+        detail_title = self.query_one("#detail-title", Static)
+        detail_pane = self.query_one("#detail-pane", RichLog)
+
+        if self._view in ("dashboard", "agents"):
+            session = await self.db.get_session(key)
+            if session:
+                await self._show_agent_detail(session)
+                return
+
+        if self._view == "tasks":
+            try:
+                task = await self.db.get_task(int(key))
+            except (ValueError, TypeError):
+                return
+            if task:
+                await self._show_task_detail(task)
+                return
+
+        detail_title.update("")
+        detail_pane.clear()
+
+    async def _show_task_detail(self, task: dict) -> None:
+        """Populate the detail pane with task info."""
+        detail_title = self.query_one("#detail-title", Static)
+        detail_pane = self.query_one("#detail-pane", RichLog)
+
+        deps = ", ".join(f"#{d}" for d in task["dependencies"]) or "none"
+        detail_title.update(
+            f"[bold]Task #{task['id']}[/]  "
+            f"{_status_markup(task['status'])}  "
+            f"Priority: {'human' if task['priority'] == 0 else 'auto'}  "
+            f"Deps: {deps}  "
+            f"Created: {_humantime(task['created_at'])}"
+        )
+        detail_pane.clear()
+        desc = task.get("description", "") or "No description."
+        detail_pane.write(Text(desc))
+
+    async def _show_agent_detail(self, session: dict) -> None:
+        """Populate the detail pane with agent session info and log."""
+        detail_title = self.query_one("#detail-title", Static)
+        task_ref = f"Task #{session['task_id']}" if session["task_id"] else "—"
+        detail_title.update(
+            f"[bold]{session['agent_type']}[/] {session['id']}  "
+            f"{task_ref}  "
+            f"{_status_markup(session['status'])}  "
+            f"Started: {_humantime(session['started_at'])}"
+        )
+        self._show_detail_log(session)
+
+    def _show_detail_log(self, session: dict) -> None:
+        """Start tailing a session log in the detail pane."""
+        self._cancel_detail_worker()
+        pane = self.query_one("#detail-pane", RichLog)
+        pane.clear()
+        self._detail_worker = self.run_worker(
+            self._tail_detail(session), exclusive=False
+        )
+
+    async def _tail_detail(self, session: dict) -> None:
+        """Tail a log file into the detail pane."""
+        pane = self.query_one("#detail-pane", RichLog)
+        path = Path(session["log_path"])
+        if not path.exists():
+            pane.write(Text("Log file not found.", style="#ef4444"))
+            return
+        with open(path) as f:
+            while True:
+                line = f.readline()
+                if line:
+                    formatted = _format_log_line(line)
+                    if formatted:
+                        pane.write(formatted)
+                else:
+                    s = await self.db.get_session(session["id"])
+                    if s and s["status"] != "running":
+                        break
+                    await asyncio.sleep(0.5)
+
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        if self._view == "agents" and event.row_key:
+        """Enter pushes full-screen log viewer for agents."""
+        if self._view in ("dashboard", "agents") and event.row_key:
             session = await self.db.get_session(str(event.row_key.value))
             if session:
                 self.push_screen(SessionScreen(session, self.db))
@@ -408,20 +552,23 @@ class DaemonApp(App):
                 s["agent_type"],
                 f"#{s['task_id']}" if s["task_id"] else "—",
                 s["id"],
-                s["status"],
+                _status(s["status"]),
                 _humantime(s["started_at"]),
+                key=s["id"],
             )
 
-        try:
-            git_log = subprocess.check_output(
-                ["git", "log", "--oneline", "-10"],
-                cwd=self.config.project_dir,
-            ).decode().strip()
-            self.query_one("#detail", Static).update(
-                f"[dim]Recent Commits:[/]\n{git_log}"
-            )
-        except subprocess.CalledProcessError:
-            self.query_one("#detail", Static).update("")
+        # Show first running agent's log, or activity summary
+        if running:
+            await self._show_agent_detail(running[0])
+        else:
+            detail_pane = self.query_one("#detail-pane", RichLog)
+            detail_pane.clear()
+            self.query_one("#detail-title", Static).update("[dim]Recent Activity[/]")
+            activity_path = self.config.daemon_dir / "activity.md"
+            if activity_path.exists():
+                detail_pane.write(Text(activity_path.read_text()))
+            else:
+                detail_pane.write(Text("No activity yet. The orchestrator will generate a summary after its first cycle.", style="#71717a"))
 
     async def _show_tasks(self) -> None:
         self._view = "tasks"
@@ -430,35 +577,50 @@ class DaemonApp(App):
         table = self.query_one("#main-table", DataTable)
         table.clear(columns=True)
         table.add_columns("#", "Title", "Status", "Priority", "Created")
-        for t in await self.db.list_tasks():
+        tasks = await self.db.list_tasks()
+        for t in tasks:
             table.add_row(
                 str(t["id"]),
                 t["title"][:60],
-                t["status"],
+                _status(t["status"]),
                 "human" if t["priority"] == 0 else "auto",
                 _humantime(t["created_at"]),
+                key=str(t["id"]),
             )
-        self.query_one("#detail", Static).update("")
+
+        # Show first task in detail pane
+        if tasks:
+            await self._show_task_detail(tasks[0])
+        else:
+            self.query_one("#detail-title", Static).update("")
+            self.query_one("#detail-pane", RichLog).clear()
 
     async def _show_agents(self) -> None:
         self._view = "agents"
         self.query_one("#status-bar", Static).update(
-            "[bold]Agent Sessions[/]  [dim](enter to view logs)[/]"
+            "[bold]Agent Sessions[/]  [dim](enter for fullscreen)[/]"
         )
 
         table = self.query_one("#main-table", DataTable)
         table.clear(columns=True)
         table.add_columns("Session", "Type", "Task", "Status", "Started")
-        for s in await self.db.list_sessions():
+        sessions = await self.db.list_sessions()
+        for s in sessions:
             table.add_row(
                 s["id"],
                 s["agent_type"],
                 f"#{s['task_id']}" if s["task_id"] else "—",
-                s["status"],
+                _status(s["status"]),
                 _humantime(s["started_at"]),
                 key=s["id"],
             )
-        self.query_one("#detail", Static).update("")
+
+        # Show first session's log in detail pane
+        if sessions:
+            await self._show_agent_detail(sessions[0])
+        else:
+            self.query_one("#detail-title", Static).update("")
+            self.query_one("#detail-pane", RichLog).clear()
 
     async def _show_constraints(self) -> None:
         self._view = "constraints"
@@ -467,9 +629,11 @@ class DaemonApp(App):
         table = self.query_one("#main-table", DataTable)
         table.clear(columns=True)
 
-        content = ""
+        self.query_one("#detail-title", Static).update("[dim]Constraints[/]")
+        pane = self.query_one("#detail-pane", RichLog)
+        pane.clear()
         if self.config.constraints_path.exists():
-            content = self.config.constraints_path.read_text()
-        self.query_one("#detail", Static).update(
-            content or "[dim]No constraints defined.[/]"
-        )
+            content = self.config.constraints_path.read_text().strip()
+            pane.write(Text(content or "No constraints defined."))
+        else:
+            pane.write(Text("No constraints defined."))

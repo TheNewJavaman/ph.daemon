@@ -100,7 +100,7 @@ Tasks can depend on other tasks: `phd create-task "Run eval" --depends-on 1 --de
 
 ```
 my-project/
-├── .ph.daemon/
+├── .phd/
 │   ├── config.json       # project config
 │   ├── daemon.db          # SQLite: tasks, sessions, messages
 │   └── logs/              # agent session logs (JSONL)

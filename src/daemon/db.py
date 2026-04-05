@@ -9,14 +9,15 @@ import aiosqlite
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    title       TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL DEFAULT 'open',
-    priority    INTEGER NOT NULL DEFAULT 1,
-    dependencies TEXT NOT NULL DEFAULT '[]',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    title           TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'open',
+    priority        INTEGER NOT NULL DEFAULT 1,
+    dependencies    TEXT NOT NULL DEFAULT '[]',
+    claude_session  TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -30,11 +31,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     ended_at    TEXT
 );
 
-CREATE TABLE IF NOT EXISTS messages (
+CREATE TABLE IF NOT EXISTS conversations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    content     TEXT NOT NULL,
-    read        INTEGER NOT NULL DEFAULT 0,
+    title       TEXT NOT NULL,
+    claude_session TEXT,
     created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    role            TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
 );
 """
 
@@ -50,6 +60,21 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.executescript(SCHEMA)
+        # Migrations
+        try:
+            await self._conn.execute(
+                "ALTER TABLE tasks ADD COLUMN claude_session TEXT"
+            )
+        except Exception:
+            pass
+        # Drop old messages table if it lacks conversation_id
+        try:
+            await self._conn.execute(
+                "SELECT conversation_id FROM messages LIMIT 1"
+            )
+        except Exception:
+            await self._conn.execute("DROP TABLE IF EXISTS messages")
+            await self._conn.executescript(SCHEMA)
 
     async def close(self) -> None:
         if self._conn:
@@ -90,7 +115,7 @@ class Database:
             return d
 
     async def update_task(self, task_id: int, **kwargs: object) -> None:
-        allowed = {"title", "description", "status", "priority", "dependencies", "updated_at"}
+        allowed = {"title", "description", "status", "priority", "dependencies", "claude_session", "updated_at"}
         bad = set(kwargs) - allowed
         if bad:
             raise ValueError(f"Invalid task columns: {bad}")
@@ -117,7 +142,12 @@ class Database:
             return rows
 
     async def pick_next_task(self) -> dict | None:
-        """Find the next unblocked open task."""
+        """Find the next task to work on. Interrupted tasks resume first."""
+        # Interrupted tasks have a Claude session to resume — pick them first
+        interrupted = await self.list_tasks(status="interrupted")
+        if interrupted:
+            return interrupted[0]
+
         open_tasks = await self.list_tasks(status="open")
         completed = await self.list_tasks(status="completed")
         completed_ids = {t["id"] for t in completed}
@@ -204,24 +234,58 @@ class Database:
         await self.conn.commit()
         return cursor.rowcount
 
-    # --- Messages (human → orchestrator) ---
+    # --- Conversations ---
 
-    async def send_message(self, content: str) -> int:
+    async def create_conversation(self, title: str) -> int:
         now = datetime.now(timezone.utc).isoformat()
         cursor = await self.conn.execute(
-            "INSERT INTO messages (content, created_at) VALUES (?, ?)",
-            (content, now),
+            "INSERT INTO conversations (title, created_at) VALUES (?, ?)",
+            (title, now),
         )
         await self.conn.commit()
         return cursor.lastrowid
 
-    async def read_messages(self) -> list[dict]:
-        """Return unread messages and mark them read."""
+    async def get_conversation(self, conv_id: int) -> dict | None:
         async with self.conn.execute(
-            "SELECT * FROM messages WHERE read = 0 ORDER BY id"
+            "SELECT * FROM conversations WHERE id = ?", (conv_id,)
         ) as cursor:
-            rows = [dict(r) for r in await cursor.fetchall()]
-        if rows:
-            await self.conn.execute("UPDATE messages SET read = 1 WHERE read = 0")
-            await self.conn.commit()
-        return rows
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def update_conversation(self, conv_id: int, **kwargs: object) -> None:
+        allowed = {"title", "claude_session"}
+        bad = set(kwargs) - allowed
+        if bad:
+            raise ValueError(f"Invalid conversation columns: {bad}")
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values())
+        vals.append(conv_id)
+        await self.conn.execute(
+            f"UPDATE conversations SET {sets} WHERE id = ?", vals
+        )
+        await self.conn.commit()
+
+    async def list_conversations(self) -> list[dict]:
+        async with self.conn.execute(
+            "SELECT * FROM conversations ORDER BY created_at DESC"
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def add_message(
+        self, conversation_id: int, role: str, content: str,
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = await self.conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (conversation_id, role, content, now),
+        )
+        await self.conn.commit()
+        return cursor.lastrowid
+
+    async def list_messages(self, conversation_id: int) -> list[dict]:
+        async with self.conn.execute(
+            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id",
+            (conversation_id,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
