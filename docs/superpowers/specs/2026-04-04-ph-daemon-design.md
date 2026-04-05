@@ -143,11 +143,11 @@ modifying dependency links.
 
 ## Communication Modes
 
-| Mode | What happens | Agent |
-|---|---|---|
-| **Read-only** | Human asks a question, interactive back-and-forth | Ephemeral |
-| **Additive** | Human requests feature → interactive refinement → planner creates issues → implementor picks them up | Planner → Implementor |
-| **Subtractive** | Human pushes a constraint → interactive refinement → written to `docs/constraints.md` + issue created | Ephemeral |
+| Mode | CLI command | What happens | Agent |
+|---|---|---|---|
+| **Ask** | `phd ask` | Human asks a question, interactive back-and-forth | Ephemeral |
+| **Task** | `phd task` | Human requests feature → interactive refinement → planner creates issues → implementor picks them up | Planner → Implementor |
+| **Constraint** | `phd constrain` | Human pushes a constraint → interactive refinement → written to `docs/constraints.md` + issue created | Ephemeral |
 
 ## GitHub Integration
 
@@ -305,9 +305,9 @@ stale results across evaluation runs.
 
 Constraints are numbered, dated, linked to an issue, and include rationale.
 
-## Data Model (SQLite)
+## Data Model
 
-Local cache in `.ph.daemon/daemon.db`. GitHub issues are the source of truth.
+### SQLite (`.ph.daemon/daemon.db`) — local state only
 
 ```sql
 sessions (
@@ -320,38 +320,19 @@ sessions (
     started_at  TEXT NOT NULL,
     ended_at    TEXT
 )
-
-issues (
-    number      INTEGER PRIMARY KEY,
-    title       TEXT NOT NULL,
-    state       TEXT NOT NULL,       -- open | closed
-    labels      TEXT NOT NULL,       -- JSON array
-    blocked_by  TEXT NOT NULL,       -- JSON array of issue numbers
-    blocks      TEXT NOT NULL,       -- JSON array of issue numbers
-    agent_type  TEXT,                -- which agent owns this
-    synced_at   TEXT NOT NULL
-)
-
-commits (
-    sha         TEXT PRIMARY KEY,
-    issue_id    INTEGER NOT NULL,
-    kind        TEXT NOT NULL,       -- implement | accept | revert
-    summary     TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    FOREIGN KEY (issue_id) REFERENCES issues(number)
-)
-
-constraints (
-    id          TEXT PRIMARY KEY,    -- C-001, C-002, ...
-    issue_id    INTEGER NOT NULL,
-    summary     TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    FOREIGN KEY (issue_id) REFERENCES issues(number)
-)
 ```
 
-**Sync:** Issues polled from GitHub every 30s. Commits populated by post-commit
-hook. Constraints parsed from `docs/constraints.md` on startup.
+This is the only table. Sessions are purely local state with no GitHub equivalent.
+
+### Everything else comes from authoritative sources
+
+- **Issues:** GitHub API via `gh` CLI, cached in-memory with 30s TTL
+- **Commits:** `git log`, authoritative and fast
+- **Constraints:** Parsed from `docs/constraints.md` on demand
+- **Dependency graph:** Parsed from GitHub issue task lists on each resolution
+
+GitHub API rate limit is 5000 req/hr authenticated. A single-user tool polling
+every 5s uses ~720 req/hr — well within budget. No local mirror needed.
 
 ## Web UI (Control Plane)
 
@@ -433,11 +414,35 @@ claude_cmd = [
     "claude",
     "--print",                          # omitted for interactive sessions
     "--output-format", "json",
-    "--system-prompt", system_prompt,    # prompts/{type}.md + constraints
-    "--allowedTools", tools,             # scoped per agent type
-    "--max-turns", "100",
+    "--model", "claude-opus-4-6",       # always opus
+    "--max-turns", "100",               # safety bound
+    "--dangerously-skip-permissions",   # fully automated
+    "--append-system-prompt", prompt,   # APPEND, not replace — preserves
+                                        # Claude Code harness (memories, etc.)
+    "--allowedTools", tools,            # scoped per agent type
 ]
 ```
+
+**Important:** We use `--append-system-prompt` (not `--system-prompt`) so the
+Claude Code harness remains intact — memories, CLAUDE.md, plugin features all
+continue to work. Our prompt is additive context, not a replacement.
+
+### Context Window Budget
+
+Each task dispatched to the implementor should fit within a single context
+window (1M tokens for Opus 4.6). The controller (implementor loop) is
+responsible for:
+
+- **Providing full context upfront** — don't make the subagent search for files.
+  Include the issue body, relevant constraints, and prior issue discussions
+  directly in the prompt.
+- **Scoping tasks tightly** — if the planner creates an issue that would exceed
+  one context window, it should be decomposed further.
+- **Status protocol** — subagents report back with:
+  - `DONE` — proceed to post-commit discussion
+  - `DONE_WITH_CONCERNS` — completed but flagged doubts; review before proceeding
+  - `BLOCKED` — cannot complete; controller provides more context or decomposes
+  - `NEEDS_CONTEXT` — missing information; controller provides and re-dispatches
 
 ### Process Lifecycle
 
