@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority        INTEGER NOT NULL DEFAULT 1,
     dependencies    TEXT NOT NULL DEFAULT '[]',
     claude_session  TEXT,
+    retries         INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
     updated_at      TEXT
 );
@@ -61,12 +62,14 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.executescript(SCHEMA)
         # Migrations
-        try:
-            await self._conn.execute(
-                "ALTER TABLE tasks ADD COLUMN claude_session TEXT"
-            )
-        except Exception:
-            pass
+        for col, ddl in [
+            ("claude_session", "ALTER TABLE tasks ADD COLUMN claude_session TEXT"),
+            ("retries", "ALTER TABLE tasks ADD COLUMN retries INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            try:
+                await self._conn.execute(ddl)
+            except Exception:
+                pass
         # Drop old messages table if it lacks conversation_id
         try:
             await self._conn.execute(
@@ -115,7 +118,7 @@ class Database:
             return d
 
     async def update_task(self, task_id: int, **kwargs: object) -> None:
-        allowed = {"title", "description", "status", "priority", "dependencies", "claude_session", "updated_at"}
+        allowed = {"title", "description", "status", "priority", "dependencies", "claude_session", "retries", "updated_at"}
         bad = set(kwargs) - allowed
         if bad:
             raise ValueError(f"Invalid task columns: {bad}")

@@ -20,6 +20,8 @@ from daemon.db import Database
 
 logger = logging.getLogger(__name__)
 
+MAX_RETRIES = 2
+
 
 class Orchestrator:
     def __init__(self, config: ProjectConfig, db: Database) -> None:
@@ -141,8 +143,28 @@ class Orchestrator:
             await self.db.update_task(task_id, status="interrupted", claude_session=claude_sid)
             logger.info(f"Task #{task_id} interrupted (session {claude_sid})")
         else:
-            await self.db.update_task(task_id, status="failed", claude_session=claude_sid)
-            logger.warning(f"Task #{task_id} failed (exit {exit_code})")
+            retries = task.get("retries", 0)
+            if retries < MAX_RETRIES:
+                failure_context = self._read_log_tail(agent.log_path)
+                desc = task.get("description", "")
+                desc += (
+                    f"\n\n## Previous Failure (attempt {retries + 1})\n"
+                    f"Exit code: {exit_code}\n\n"
+                    f"```\n{failure_context}\n```"
+                )
+                await self.db.update_task(
+                    task_id, status="open", retries=retries + 1,
+                    description=desc, claude_session=None,
+                )
+                logger.info(
+                    f"Task #{task_id} failed (attempt {retries + 1}/{MAX_RETRIES + 1}), "
+                    f"will retry"
+                )
+            else:
+                await self.db.update_task(task_id, status="failed", claude_session=claude_sid)
+                logger.warning(
+                    f"Task #{task_id} failed after {retries + 1} attempts (exit {exit_code})"
+                )
 
     async def _research(self) -> None:
         """Analyze state and create new tasks."""
@@ -200,6 +222,33 @@ class Orchestrator:
             logger.warning(f"Failed to parse new_tasks.json: {e}")
         finally:
             path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _read_log_tail(log_path, max_lines: int = 40) -> str:
+        """Extract the last assistant text blocks from a stream-json log."""
+        try:
+            lines: list[str] = []
+            with open(log_path) as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    # stream-json assistant text events
+                    if data.get("type") == "assistant" and "message" in data:
+                        for block in data["message"].get("content", []):
+                            if block.get("type") == "text":
+                                lines.extend(block["text"].splitlines())
+                    # Also capture tool result errors
+                    elif data.get("type") == "result" and "error" in data:
+                        lines.append(f"Error: {data['error']}")
+            tail = lines[-max_lines:] if len(lines) > max_lines else lines
+            return "\n".join(tail)
+        except (FileNotFoundError, OSError):
+            return "(no log output available)"
 
     def _build_engineer_prompt(self, task: dict) -> str:
         """Build context for an engineer agent."""
