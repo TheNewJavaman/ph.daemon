@@ -14,7 +14,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.theme import Theme
 from textual.widgets import (
-    DataTable, Footer, Label, ListItem, ListView, RichLog, Static,
+    DataTable, Footer, Input, Label, ListItem, ListView, RichLog, Static,
 )
 
 from textual.coordinate import Coordinate
@@ -325,6 +325,12 @@ class DaemonApp(App):
         background: $panel;
         padding: 0; margin: 0;
     }
+    #constraints-list {
+        display: none;
+        height: 1fr;
+        background: $panel;
+        padding: 0 1;
+    }
     #table-box:focus-within {
         border-title-color: $foreground;
     }
@@ -368,6 +374,22 @@ class DaemonApp(App):
         background-tint: transparent;
     }
 
+    /* --- Chat input --- */
+    #chat-input {
+        display: none;
+        dock: bottom;
+        height: 1;
+        margin: 0 1;
+        background: $panel;
+        border: round $border;
+        padding: 0 1;
+        overflow-x: hidden;
+    }
+    #chat-input:focus {
+        border: round $accent;
+        background-tint: transparent;
+    }
+
     /* --- Footer --- */
     Footer { background: $panel; color: $text-muted; }
     FooterKey { background: $panel; color: $text-muted; }
@@ -387,6 +409,8 @@ class DaemonApp(App):
         Binding("q", "quit", "Quit"),
         Binding("p", "toggle_pause", "Pause/Resume"),
         Binding("t", "toggle_theme", "Theme"),
+        Binding("ctrl+s", "save_constraint", "Save constraint"),
+        Binding("n", "new_constraint", "New", show=False),
     ]
 
     def __init__(self, config: ProjectConfig):
@@ -400,6 +424,8 @@ class DaemonApp(App):
         self._bg_task: asyncio.Task | None = None
         self._view = "dashboard"
         self._data_cache: dict[tuple[str, str], dict] = {}
+        self._constraint_session: str | None = None  # Claude session for constraint chat
+        self._constraint_history: list[tuple[str, str]] = []  # (role, text) pairs
 
     def compose(self) -> ComposeResult:
         with Horizontal():
@@ -419,9 +445,14 @@ class DaemonApp(App):
                     table._show_hover_cursor = False
                     table._set_hover_cursor = lambda active: None
                     yield table
+                    yield RichLog(id="constraints-list", wrap=True)
                 with Vertical(id="detail-box") as detail_box:
                     detail_box.border_title = "Details"
                     yield RichLog(id="detail-pane", wrap=True)
+                    yield Input(
+                        id="chat-input",
+                        placeholder="Describe a constraint…",
+                    )
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -474,11 +505,70 @@ class DaemonApp(App):
     def action_toggle_theme(self) -> None:
         self.theme = "phd-light" if self.theme == "phd-dark" else "phd-dark"
 
+    async def action_save_constraint(self) -> None:
+        """Extract the last CONSTRAINT/RATIONALE from chat and append to constraints.md."""
+        if self._view != "constraints" or not self._constraint_history:
+            return
+
+        # Find the last assistant message that contains CONSTRAINT:
+        constraint_text = None
+        rationale_text = None
+        for role, msg in reversed(self._constraint_history):
+            if role != "assistant":
+                continue
+            for line in msg.splitlines():
+                stripped = line.strip()
+                if stripped.upper().startswith("CONSTRAINT:"):
+                    constraint_text = stripped.split(":", 1)[1].strip()
+                if stripped.upper().startswith("RATIONALE:"):
+                    rationale_text = stripped.split(":", 1)[1].strip()
+            if constraint_text:
+                break
+
+        if not constraint_text:
+            self.notify(
+                "No finalized constraint found — keep refining",
+                severity="warning",
+            )
+            return
+
+        # Determine next constraint number
+        existing = self._parse_constraints()
+        next_num = max((int(c["id"]) for c in existing), default=0) + 1
+
+        # Append to constraints.md
+        entry = f"\n{next_num}. {constraint_text}\n"
+        if rationale_text:
+            entry += f"   Rationale: {rationale_text}\n"
+
+        path = self.config.constraints_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(entry)
+
+        # Reset chat state
+        self._constraint_history.clear()
+        self._constraint_session = None
+        self.notify(f"Saved constraint #{next_num}: {constraint_text[:50]}")
+        await self._show_constraints()
+
+    async def action_new_constraint(self) -> None:
+        """Reset the constraint chat to start a new conversation."""
+        if self._view != "constraints":
+            return
+        self._constraint_history.clear()
+        self._constraint_session = None
+        await self._show_constraints()
 
     def _cancel_detail_worker(self) -> None:
         if hasattr(self, "_detail_worker") and self._detail_worker is not None:
             self._detail_worker.cancel()
             self._detail_worker = None
+
+    def _show_table_mode(self, constraints: bool = False) -> None:
+        """Toggle between the DataTable and the constraints RichLog."""
+        self.query_one("#main-table", DataTable).display = not constraints
+        self.query_one("#constraints-list", RichLog).display = constraints
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         self._cancel_detail_worker()
@@ -488,12 +578,107 @@ class DaemonApp(App):
             "nav-agents": self._show_agents,
             "nav-constraints": self._show_constraints,
         }
+        # Hide chat input when leaving constraints
+        chat_input = self.query_one("#chat-input", Input)
+        if event.item.id != "nav-constraints":
+            chat_input.display = False
+
         handler = handlers.get(event.item.id)
         if handler:
             await handler()
-            table = self.query_one("#main-table", DataTable)
-            if table.row_count > 0:
-                table.focus()
+            if event.item.id != "nav-constraints":
+                table = self.query_one("#main-table", DataTable)
+                if table.row_count > 0:
+                    table.focus()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle chat input submission for constraint refinement."""
+        if self._view != "constraints" or event.input.id != "chat-input":
+            return
+        text = event.value.strip()
+        if not text:
+            return
+        event.input.value = ""
+        event.input.disabled = True
+
+        pane = self.query_one("#detail-pane", RichLog)
+        self._constraint_history.append(("user", text))
+        pane.write(Text(f"▶ {text}", style="bold"))
+        pane.write(Text(""))
+
+        self.run_worker(self._constraint_chat(text), exclusive=False)
+
+    async def _constraint_chat(self, user_msg: str) -> None:
+        """Send the constraint conversation to Claude and display the response."""
+        pane = self.query_one("#detail-pane", RichLog)
+        chat_input = self.query_one("#chat-input", Input)
+
+        existing = ""
+        if self.config.constraints_path.exists():
+            existing = self.config.constraints_path.read_text().strip()
+
+        # Build full conversation as a single prompt
+        system = (
+            "You are helping a researcher define a project constraint. "
+            "Constraints are rules that ALL agents must follow. "
+            "They live in docs/constraints.md as numbered entries.\n\n"
+            "Help refine the idea into something precise and actionable. "
+            "Ask clarifying questions if the idea is vague. "
+            "When the constraint is clear, present the final version as:\n\n"
+            "CONSTRAINT: <one-line title>\n"
+            "RATIONALE: <why this matters>\n\n"
+            "Keep responses concise (2-4 sentences). "
+            "The human will press ctrl+s to save once satisfied."
+        )
+        if existing:
+            system += f"\n\nExisting constraints:\n{existing}"
+
+        # Replay conversation as a single prompt so each call is stateless
+        parts = []
+        for role, msg in self._constraint_history:
+            if role == "user":
+                parts.append(f"Human: {msg}")
+            else:
+                parts.append(f"Assistant: {msg}")
+        prompt = "\n\n".join(parts) + "\n\nAssistant:"
+
+        cmd = [
+            "claude", "--print",
+            "--model", "claude-sonnet-4-6",
+            "--max-turns", "1",
+            "--append-system-prompt", system,
+            prompt,
+        ]
+
+        pane.write(Text("…", style="#71717a italic"))
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=self.config.project_dir,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+            response = stdout.decode().strip() if stdout else "(no response)"
+        except TimeoutError:
+            response = "(timed out)"
+        except Exception as e:
+            response = f"(error: {e})"
+
+        self._constraint_history.append(("assistant", response))
+
+        # Redraw full chat
+        pane.clear()
+        for role, msg in self._constraint_history:
+            if role == "user":
+                pane.write(Text(f"▶ {msg}", style="bold"))
+            else:
+                pane.write(Text(msg))
+            pane.write(Text(""))
+
+        chat_input.disabled = False
+        chat_input.focus()
 
     async def on_tracked_table_cursor_moved(self, event: TrackedTable.CursorMoved) -> None:
         """Update detail pane when cursor moves via arrow keys."""
@@ -658,6 +843,7 @@ class DaemonApp(App):
 
     async def _show_dashboard(self) -> None:
         self._view = "dashboard"
+        self._show_table_mode(constraints=False)
         running = await self.db.list_sessions(status="running")
         open_tasks = await self.db.list_tasks(status="open")
         paused = self.orchestrator.is_paused if self.orchestrator else False
@@ -702,6 +888,7 @@ class DaemonApp(App):
 
     async def _show_tasks(self) -> None:
         self._view = "tasks"
+        self._show_table_mode(constraints=False)
         self._set_titles("Tasks")
 
         tasks = await self.db.list_tasks()
@@ -729,6 +916,7 @@ class DaemonApp(App):
 
     async def _show_agents(self) -> None:
         self._view = "agents"
+        self._show_table_mode(constraints=False)
         self._set_titles("Agents")
 
         sessions = await self.db.list_sessions()
@@ -754,17 +942,81 @@ class DaemonApp(App):
         elif rebuilt:
             await self._show_agent_detail(sessions[0])
 
+    def _parse_constraints(self) -> list[dict]:
+        """Parse constraints.md into a list of {id, title, body} dicts."""
+        if not self.config.constraints_path.exists():
+            return []
+        content = self.config.constraints_path.read_text()
+        constraints = []
+        current: dict | None = None
+        for line in content.splitlines():
+            stripped = line.strip()
+            # Match numbered constraints like "1. ..." or "## 1. ..."
+            if stripped and (stripped[0].isdigit() or stripped.startswith("## ")):
+                # Try to extract a number prefix
+                text = stripped.lstrip("#").strip()
+                if text and text[0].isdigit():
+                    dot = text.find(".")
+                    if dot > 0:
+                        num = text[:dot].strip()
+                        title = text[dot + 1:].strip()
+                        if current:
+                            constraints.append(current)
+                        current = {"id": num, "title": title, "body": ""}
+                        continue
+            if current:
+                current["body"] += line + "\n"
+        if current:
+            constraints.append(current)
+        return constraints
+
     async def _show_constraints(self) -> None:
         self._view = "constraints"
-        self._set_titles("Constraints", "Constraints")
+        self._show_table_mode(constraints=True)
 
-        table = self.query_one("#main-table", DataTable)
-        table.clear(columns=True)
+        constraints = self._parse_constraints()
+        self._set_titles(
+            f"Constraints ({len(constraints)})",
+            "New Constraint — chat to refine, ctrl+s to save",
+        )
 
+        clist = self.query_one("#constraints-list", RichLog)
+        clist.clear()
+        if constraints:
+            for c in constraints:
+                clist.write(Text(f"{c['id']}. {c['title']}", style="bold"))
+                body = c["body"].strip()
+                if body:
+                    clist.write(Text(f"   {body}", style="#a1a1aa"))
+                clist.write(Text(""))
+        else:
+            clist.write(Text("No constraints defined.", style="#71717a"))
+
+        # Show chat input
+        chat_input = self.query_one("#chat-input", Input)
+        chat_input.display = True
+
+        # Show existing chat history or welcome message
         pane = self.query_one("#detail-pane", RichLog)
         pane.clear()
-        if self.config.constraints_path.exists():
-            content = self.config.constraints_path.read_text().strip()
-            pane.write(Text(content or "No constraints defined."))
+        if self._constraint_history:
+            for role, text in self._constraint_history:
+                if role == "user":
+                    pane.write(Text(f"▶ {text}", style="bold"))
+                else:
+                    pane.write(Text(text))
+                pane.write(Text(""))
         else:
-            pane.write(Text("No constraints defined."))
+            pane.write(Text(
+                "Describe a constraint you'd like to add. "
+                "I'll help you refine it into something precise and actionable.",
+                style="#71717a",
+            ))
+            pane.write(Text(""))
+            pane.write(Text(
+                "Examples: \"agents should never modify the database schema\", "
+                "\"all experiments must be reproducible with a fixed seed\"",
+                style="#71717a italic",
+            ))
+
+        chat_input.focus()
