@@ -14,10 +14,33 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.theme import Theme
 from textual.widgets import (
-    DataTable, Footer, Header, Label, ListItem, ListView, RichLog, Static,
+    DataTable, Footer, Label, ListItem, ListView, RichLog, Static,
 )
 
+from textual.coordinate import Coordinate
+from textual.message import Message
+
 from daemon.config import ProjectConfig
+
+
+class TrackedTable(DataTable):
+    """DataTable that posts a message when the cursor row changes."""
+
+    class CursorMoved(Message):
+        def __init__(self, row_key) -> None:
+            super().__init__()
+            self.row_key = row_key
+
+    def watch_cursor_coordinate(
+        self, old: Coordinate, new: Coordinate,
+    ) -> None:
+        super().watch_cursor_coordinate(old, new)
+        if old.row != new.row and self.row_count > 0:
+            try:
+                row_key, _ = self.coordinate_to_cell_key(new)
+                self.post_message(self.CursorMoved(row_key))
+            except Exception:
+                pass
 from daemon.db import Database
 from daemon.orchestrator import Orchestrator
 
@@ -119,7 +142,8 @@ def _humantime(value: str | None) -> str:
         return "—"
     try:
         dt = datetime.fromisoformat(value)
-        return dt.strftime("%b %-d, %-I:%M %p")
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%b %-d, %-I:%M %p")
     except (ValueError, TypeError):
         return value
 
@@ -170,7 +194,6 @@ class SessionScreen(Screen):
 
     def compose(self) -> ComposeResult:
         s = self.session
-        yield Header()
         yield Static(
             f"[bold]{s['agent_type']}[/] session {s['id']}  "
             f"Task: {'#' + str(s['task_id']) if s['task_id'] else '—'}  "
@@ -271,38 +294,51 @@ class DaemonApp(App):
 
     /* --- Sidebar --- */
     #sidebar {
-        width: 24; dock: left;
+        width: 26; dock: left;
         background: $panel;
-        padding: 1 0;
-    }
-    #sidebar-title {
-        color: $accent; text-style: bold;
-        padding: 0 2; margin-bottom: 1;
+        border: round $border;
+        border-title-color: $accent;
+        border-title-style: bold;
+        padding: 0 1;
+        margin: 0;
     }
     #nav { background: transparent; }
     #nav > ListItem {
-        padding: 0 2; color: $text-muted;
+        padding: 0 1; color: $text-muted;
         background: transparent;
     }
     #nav > ListItem.-highlight {
         background: $boost; color: $text;
     }
-    ListView { background: transparent; }
-    ListView:focus { background: transparent; }
+    ListView { background: transparent; background-tint: transparent; }
+    ListView:focus { background: transparent; background-tint: transparent; }
 
     /* --- Content --- */
-    #content { padding: 1 2; }
-    #status-bar { height: auto; margin-bottom: 1; }
+    #content { padding: 0; margin: 0; }
 
     /* --- DataTable --- */
+    #table-box {
+        height: 1fr; max-height: 50%;
+        border: round $border;
+        border-title-color: $text-muted;
+        border-title-style: bold;
+        background: $panel;
+        padding: 0; margin: 0;
+    }
+    #table-box:focus-within {
+        border-title-color: $foreground;
+    }
     DataTable {
         height: 1fr;
-        max-height: 50%;
-        background: $surface;
+        background: $panel;
+        background-tint: transparent;
+    }
+    DataTable:focus {
+        background-tint: transparent;
     }
     DataTable > .datatable--header {
         color: $text-muted; text-style: bold;
-        background: $surface;
+        background: $panel;
     }
     DataTable > .datatable--cursor {
         background: $accent; color: $surface;
@@ -312,23 +348,38 @@ class DaemonApp(App):
     }
 
     /* --- Detail pane --- */
-    #detail-title { height: auto; margin-top: 1; color: $text-muted; }
-    #detail-pane {
+    #detail-box {
         height: 1fr; min-height: 5;
-        background: $panel; border: solid $border;
+        border: round $border;
+        border-title-color: $text-muted;
+        background: $panel;
+        padding: 0; margin: 0;
+    }
+    #detail-box:focus-within {
+        border-title-color: $foreground;
+    }
+    #detail-pane {
+        height: 1fr;
+        background: $panel;
+        background-tint: transparent;
+        padding: 0 1;
+    }
+    #detail-pane:focus {
+        background-tint: transparent;
     }
 
-    /* --- Header / Footer --- */
-    Header { background: $panel; color: $accent; }
-    HeaderTitle { color: $accent; text-style: bold; background: $panel; }
+    /* --- Footer --- */
     Footer { background: $panel; color: $text-muted; }
     FooterKey { background: $panel; color: $text-muted; }
     FooterKey:hover { background: $boost; }
     FooterKey.-compact .footer-key--key { color: $accent; background: $panel; }
     FooterKey.-compact .footer-key--description { color: $text-muted; background: $panel; }
+    FooterKey.-command-palette { border-left: none; }
 
     /* --- Log viewer --- */
-    RichLog { background: $panel; border: solid $border; }
+    RichLog { background: $panel; }
+    #detail-pane { border: none; }
+    #log { border: round $border; }
     .session-meta { color: $text-muted; margin-bottom: 1; }
     """
 
@@ -348,24 +399,29 @@ class DaemonApp(App):
         self.orchestrator: Orchestrator | None = None
         self._bg_task: asyncio.Task | None = None
         self._view = "dashboard"
+        self._data_cache: dict[tuple[str, str], dict] = {}
 
     def compose(self) -> ComposeResult:
-        yield Header()
         with Horizontal():
-            with Vertical(id="sidebar"):
-                yield Label("ph.daemon", id="sidebar-title")
+            with Vertical(id="sidebar") as sidebar:
+                sidebar.border_title = "ph.daemon"
                 yield ListView(
                     ListItem(Label(" Dashboard"), id="nav-dashboard"),
-                    ListItem(Label(" Tasks"), id="nav-tasks"),
                     ListItem(Label(" Agents"), id="nav-agents"),
+                    ListItem(Label(" Tasks"), id="nav-tasks"),
                     ListItem(Label(" Constraints"), id="nav-constraints"),
                     id="nav",
                 )
             with Vertical(id="content"):
-                yield Static(id="status-bar")
-                yield DataTable(id="main-table", cursor_type="row")
-                yield Static(id="detail-title", markup=True)
-                yield RichLog(id="detail-pane", wrap=True)
+                with Vertical(id="table-box") as table_box:
+                    table_box.border_title = "Dashboard"
+                    table = TrackedTable(id="main-table", cursor_type="row")
+                    table._show_hover_cursor = False
+                    table._set_hover_cursor = lambda active: None
+                    yield table
+                with Vertical(id="detail-box") as detail_box:
+                    detail_box.border_title = "Details"
+                    yield RichLog(id="detail-pane", wrap=True)
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -377,7 +433,7 @@ class DaemonApp(App):
         recovered = await self.db.recover_interrupted_tasks()
         if stale or recovered:
             self.notify(
-                f"Recovered: {stale} sessions, {recovered} tasks reset to open"
+                f"Recovered: {stale} sessions, {recovered} tasks marked for resume"
             )
 
         self.orchestrator = Orchestrator(config=self.config, db=self.db)
@@ -386,16 +442,25 @@ class DaemonApp(App):
         self.set_interval(5.0, self._refresh)
         await self._show_dashboard()
 
-    async def on_unmount(self) -> None:
-        # Gracefully stop orchestrator (kills agent, resets task)
+    async def _shutdown(self) -> None:
+        """Gracefully stop orchestrator and clean up DB."""
         if self.orchestrator:
             await self.orchestrator.stop()
+            self.orchestrator = None
         if self._bg_task:
             self._bg_task.cancel()
-
+            self._bg_task = None
         if self.db:
             await self.db.mark_stale_running()
             await self.db.close()
+            self.db = None
+
+    async def action_quit(self) -> None:
+        await self._shutdown()
+        self.exit()
+
+    async def on_unmount(self) -> None:
+        await self._shutdown()
 
     def action_toggle_pause(self) -> None:
         if self.orchestrator:
@@ -408,6 +473,7 @@ class DaemonApp(App):
 
     def action_toggle_theme(self) -> None:
         self.theme = "phd-light" if self.theme == "phd-dark" else "phd-dark"
+
 
     def _cancel_detail_worker(self) -> None:
         if hasattr(self, "_detail_worker") and self._detail_worker is not None:
@@ -425,62 +491,41 @@ class DaemonApp(App):
         handler = handlers.get(event.item.id)
         if handler:
             await handler()
+            table = self.query_one("#main-table", DataTable)
+            if table.row_count > 0:
+                table.focus()
 
-    async def on_data_table_cursor_moved(self, event: DataTable.CursorMoved) -> None:
-        """Populate the detail pane when cursor moves over a row."""
-        row_key = event.row_key
-        if not row_key:
-            return
+    async def on_tracked_table_cursor_moved(self, event: TrackedTable.CursorMoved) -> None:
+        """Update detail pane when cursor moves via arrow keys."""
+        if event.row_key:
+            await self._update_detail_for_key(str(event.row_key.value))
 
-        key = str(row_key.value)
-        detail_title = self.query_one("#detail-title", Static)
-        detail_pane = self.query_one("#detail-pane", RichLog)
-
-        if self._view in ("dashboard", "agents"):
-            session = await self.db.get_session(key)
-            if session:
-                await self._show_agent_detail(session)
-                return
-
-        if self._view == "tasks":
-            try:
-                task = await self.db.get_task(int(key))
-            except (ValueError, TypeError):
-                return
-            if task:
-                await self._show_task_detail(task)
-                return
-
-        detail_title.update("")
-        detail_pane.clear()
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Update detail pane on click/enter."""
+        if event.row_key:
+            await self._update_detail_for_key(str(event.row_key.value))
 
     async def _show_task_detail(self, task: dict) -> None:
         """Populate the detail pane with task info."""
-        detail_title = self.query_one("#detail-title", Static)
-        detail_pane = self.query_one("#detail-pane", RichLog)
-
         deps = ", ".join(f"#{d}" for d in task["dependencies"]) or "none"
-        detail_title.update(
-            f"[bold]Task #{task['id']}[/]  "
-            f"{_status_markup(task['status'])}  "
-            f"Priority: {'human' if task['priority'] == 0 else 'auto'}  "
-            f"Deps: {deps}  "
-            f"Created: {_humantime(task['created_at'])}"
+        status_label = _STATUS_GLYPHS.get(task["status"], task["status"])
+        priority = "human" if task["priority"] == 0 else "auto"
+        self.query_one("#detail-box").border_title = (
+            f"Task #{task['id']} · {status_label} · {priority} · deps: {deps}"
         )
-        detail_pane.clear()
+        pane = self.query_one("#detail-pane", RichLog)
+        pane.clear()
         desc = task.get("description", "") or "No description."
-        detail_pane.write(Text(desc))
+        pane.write(Text(desc))
 
     async def _show_agent_detail(self, session: dict) -> None:
         """Populate the detail pane with agent session info and log."""
-        detail_title = self.query_one("#detail-title", Static)
-        task_ref = f"Task #{session['task_id']}" if session["task_id"] else "—"
-        detail_title.update(
-            f"[bold]{session['agent_type']}[/] {session['id']}  "
-            f"{task_ref}  "
-            f"{_status_markup(session['status'])}  "
-            f"Started: {_humantime(session['started_at'])}"
-        )
+        task_ref = f"Task #{session['task_id']}" if session["task_id"] else ""
+        status_label = _STATUS_GLYPHS.get(session["status"], session["status"])
+        parts = [session["agent_type"], session["id"][:8], status_label]
+        if task_ref:
+            parts.append(task_ref)
+        self.query_one("#detail-box").border_title = " · ".join(parts)
         self._show_detail_log(session)
 
     def _show_detail_log(self, session: dict) -> None:
@@ -499,7 +544,25 @@ class DaemonApp(App):
         if not path.exists():
             pane.write(Text("Log file not found.", style="#ef4444"))
             return
+
+        is_done = session["status"] not in ("running",)
+
         with open(path) as f:
+            if is_done:
+                # For completed/failed sessions, only show last 200 lines
+                lines = f.readlines()[-200:]
+            else:
+                lines = f.readlines()
+
+            for line in lines:
+                formatted = _format_log_line(line)
+                if formatted:
+                    pane.write(formatted)
+
+            if is_done:
+                return
+
+            # Live tail for running sessions
             while True:
                 line = f.readline()
                 if line:
@@ -512,12 +575,6 @@ class DaemonApp(App):
                         break
                     await asyncio.sleep(0.5)
 
-    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Enter pushes full-screen log viewer for agents."""
-        if self._view in ("dashboard", "agents") and event.row_key:
-            session = await self.db.get_session(str(event.row_key.value))
-            if session:
-                self.push_screen(SessionScreen(session, self.db))
 
     async def _refresh(self) -> None:
         refreshable = {"dashboard", "tasks", "agents"}
@@ -529,107 +586,181 @@ class DaemonApp(App):
             }
             await handlers[self._view]()
 
+    def _set_titles(self, table_title: str, detail_title: str = "Details") -> None:
+        self.query_one("#table-box").border_title = table_title
+        self.query_one("#detail-box").border_title = detail_title
+
+    def _save_cursor(self) -> str | None:
+        """Return the key of the currently selected row, if any."""
+        table = self.query_one("#main-table", DataTable)
+        if table.row_count == 0:
+            return None
+        try:
+            row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+            return str(row_key.value)
+        except Exception:
+            return None
+
+    def _update_table(
+        self,
+        columns: tuple[str, ...],
+        rows: list[tuple[str, ...]],
+        keys: list[str],
+    ) -> bool:
+        """Update the table in-place if possible. Returns True if rebuilt from scratch."""
+        table = self.query_one("#main-table", DataTable)
+
+        # Check if we can do an in-place update (same columns, same keys in same order)
+        if table.row_count > 0 and len(table.columns) == len(columns):
+            existing_keys = [str(k.value) for k in table.rows]
+            if existing_keys == keys:
+                # Same structure — update changed cells only
+                col_keys = list(table.columns.keys())
+                for row_idx, key in enumerate(keys):
+                    for col_idx, col_key in enumerate(col_keys):
+                        old_val = table.get_cell(key, col_key)
+                        new_val = rows[row_idx][col_idx]
+                        if old_val != new_val:
+                            table.update_cell(key, col_key, new_val)
+                return False
+
+        # Different structure — full rebuild
+        saved = self._save_cursor()
+        table.clear(columns=True)
+        table.add_columns(*columns)
+        for key, row in zip(keys, rows):
+            table.add_row(*row, key=key)
+        if saved:
+            for idx, k in enumerate(table.rows):
+                if str(k.value) == saved:
+                    table.move_cursor(row=idx)
+                    break
+        return True
+
+    async def _update_detail_for_key(self, key: str) -> None:
+        """Update the detail pane for the given row key."""
+        if self._view in ("dashboard", "agents"):
+            # Use cache first for instant response, fall back to DB
+            session = self._data_cache.get(("session", key))
+            if not session:
+                session = await self.db.get_session(key)
+            if session:
+                await self._show_agent_detail(session)
+        elif self._view == "tasks":
+            task = self._data_cache.get(("task", key))
+            if not task:
+                try:
+                    task = await self.db.get_task(int(key))
+                except (ValueError, TypeError):
+                    return
+            if task:
+                await self._show_task_detail(task)
+
     async def _show_dashboard(self) -> None:
         self._view = "dashboard"
         running = await self.db.list_sessions(status="running")
         open_tasks = await self.db.list_tasks(status="open")
         paused = self.orchestrator.is_paused if self.orchestrator else False
 
-        self.query_one("#status-bar", Static).update(
-            f"[bold]Dashboard[/]  "
-            f"Running: [green]{len(running)}[/]  "
-            f"Open Tasks: [yellow]{len(open_tasks)}[/]  "
-            f"Loop: [{'red' if paused else 'green'}]"
-            f"{'Paused' if paused else 'Running'}[/]  "
-            f"[dim](p to toggle)[/]"
+        status = (
+            f"Running: {len(running)}  "
+            f"Open: {len(open_tasks)}  "
+            f"Loop: {'Paused' if paused else 'Active'}"
         )
+        self._set_titles(f"Dashboard — {status}", "Activity")
 
-        table = self.query_one("#main-table", DataTable)
-        table.clear(columns=True)
-        table.add_columns("Type", "Task", "Session", "Status", "Started")
-        for s in running:
-            table.add_row(
+        self._data_cache = {("session", s["id"]): s for s in running}
+        rows = [
+            (
                 s["agent_type"],
                 f"#{s['task_id']}" if s["task_id"] else "—",
                 s["id"],
                 _status(s["status"]),
                 _humantime(s["started_at"]),
-                key=s["id"],
             )
+            for s in running
+        ]
+        keys = [s["id"] for s in running]
+        rebuilt = self._update_table(
+            ("Type", "Task", "Session", "Status", "Started"), rows, keys,
+        )
 
-        # Show first running agent's log, or activity summary
-        if running:
-            await self._show_agent_detail(running[0])
-        else:
-            detail_pane = self.query_one("#detail-pane", RichLog)
-            detail_pane.clear()
-            self.query_one("#detail-title", Static).update("[dim]Recent Activity[/]")
+        if not running:
+            pane = self.query_one("#detail-pane", RichLog)
+            pane.clear()
             activity_path = self.config.daemon_dir / "activity.md"
             if activity_path.exists():
-                detail_pane.write(Text(activity_path.read_text()))
+                pane.write(Text(activity_path.read_text()))
             else:
-                detail_pane.write(Text("No activity yet. The orchestrator will generate a summary after its first cycle.", style="#71717a"))
+                pane.write(Text(
+                    "No activity yet. The orchestrator will generate a "
+                    "summary after its first cycle.",
+                    style="#71717a",
+                ))
+        elif rebuilt:
+            await self._show_agent_detail(running[0])
 
     async def _show_tasks(self) -> None:
         self._view = "tasks"
-        self.query_one("#status-bar", Static).update("[bold]Tasks[/]")
+        self._set_titles("Tasks")
 
-        table = self.query_one("#main-table", DataTable)
-        table.clear(columns=True)
-        table.add_columns("#", "Title", "Status", "Priority", "Created")
         tasks = await self.db.list_tasks()
-        for t in tasks:
-            table.add_row(
+        self._data_cache = {("task", str(t["id"])): t for t in tasks}
+        rows = [
+            (
                 str(t["id"]),
                 t["title"][:60],
                 _status(t["status"]),
                 "human" if t["priority"] == 0 else "auto",
                 _humantime(t["created_at"]),
-                key=str(t["id"]),
             )
+            for t in tasks
+        ]
+        keys = [str(t["id"]) for t in tasks]
+        rebuilt = self._update_table(
+            ("#", "Title", "Status", "Priority", "Created"), rows, keys,
+        )
 
-        # Show first task in detail pane
-        if tasks:
-            await self._show_task_detail(tasks[0])
-        else:
-            self.query_one("#detail-title", Static).update("")
+        if not tasks:
+            self.query_one("#detail-box").border_title = "Details"
             self.query_one("#detail-pane", RichLog).clear()
+        elif rebuilt:
+            await self._show_task_detail(tasks[0])
 
     async def _show_agents(self) -> None:
         self._view = "agents"
-        self.query_one("#status-bar", Static).update(
-            "[bold]Agent Sessions[/]  [dim](enter for fullscreen)[/]"
-        )
+        self._set_titles("Agents")
 
-        table = self.query_one("#main-table", DataTable)
-        table.clear(columns=True)
-        table.add_columns("Session", "Type", "Task", "Status", "Started")
         sessions = await self.db.list_sessions()
-        for s in sessions:
-            table.add_row(
+        self._data_cache = {("session", s["id"]): s for s in sessions}
+        rows = [
+            (
                 s["id"],
                 s["agent_type"],
                 f"#{s['task_id']}" if s["task_id"] else "—",
                 _status(s["status"]),
                 _humantime(s["started_at"]),
-                key=s["id"],
             )
+            for s in sessions
+        ]
+        keys = [s["id"] for s in sessions]
+        rebuilt = self._update_table(
+            ("Session", "Type", "Task", "Status", "Started"), rows, keys,
+        )
 
-        # Show first session's log in detail pane
-        if sessions:
-            await self._show_agent_detail(sessions[0])
-        else:
-            self.query_one("#detail-title", Static).update("")
+        if not sessions:
+            self.query_one("#detail-box").border_title = "Log"
             self.query_one("#detail-pane", RichLog).clear()
+        elif rebuilt:
+            await self._show_agent_detail(sessions[0])
 
     async def _show_constraints(self) -> None:
         self._view = "constraints"
-        self.query_one("#status-bar", Static).update("[bold]Constraints[/]")
+        self._set_titles("Constraints", "Constraints")
 
         table = self.query_one("#main-table", DataTable)
         table.clear(columns=True)
 
-        self.query_one("#detail-title", Static).update("[dim]Constraints[/]")
         pane = self.query_one("#detail-pane", RichLog)
         pane.clear()
         if self.config.constraints_path.exists():

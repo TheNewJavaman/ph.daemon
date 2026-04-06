@@ -46,17 +46,21 @@ class Orchestrator:
     async def stop(self) -> None:
         """Gracefully stop: kill current agent, save session for resume."""
         self._running = False
-        if self._current_agent:
+        agent = self._current_agent
+        task_id = self._current_task_id
+        if agent:
             logger.info("Stopping current agent gracefully...")
-            claude_sid = self._current_agent.get_claude_session_id()
-            await self._current_agent.kill()
-            if self._current_task_id:
+            await agent.kill()
+            claude_sid = agent.get_claude_session_id()
+            if task_id:
                 await self.db.update_task(
-                    self._current_task_id,
+                    task_id,
                     status="interrupted",
                     claude_session=claude_sid,
                 )
-                logger.info(f"Task #{self._current_task_id} interrupted (session saved)")
+                logger.info(f"Task #{task_id} interrupted (session {claude_sid})")
+            self._current_agent = None
+            self._current_task_id = None
 
     async def run(self) -> None:
         self._running = True
@@ -91,7 +95,7 @@ class Orchestrator:
         resuming = task["status"] == "interrupted" and resume_session
 
         if resuming:
-            logger.info(f"Resuming task #{task_id}: {task['title']}")
+            logger.info(f"Resuming task #{task_id}: {task['title']} (session {resume_session})")
             prompt = "Continue where you left off. Check the current state of your work and proceed."
         else:
             logger.info(f"Implementing task #{task_id}: {task['title']}")
@@ -99,6 +103,13 @@ class Orchestrator:
 
         await self.db.update_task(task_id, status="in_progress")
         self._current_task_id = task_id
+
+        # Find the previous phd session record to reuse when resuming
+        reuse_session = None
+        if resuming:
+            prev = await self.db.latest_session_for_task(task_id)
+            if prev:
+                reuse_session = prev["id"]
 
         agent = BaseAgent(
             agent_type=AgentType.ENGINEER,
@@ -110,10 +121,14 @@ class Orchestrator:
         self._current_session = await agent.spawn(
             prompt, interactive=False,
             resume_session=resume_session if resuming else None,
+            reuse_session=reuse_session,
         )
         exit_code = await agent.wait()
 
-        # Capture Claude's session ID for potential resumption
+        # stop() already handled cleanup — don't overwrite
+        if self._current_agent is None:
+            return
+
         claude_sid = agent.get_claude_session_id()
 
         self._current_agent = None
@@ -123,9 +138,8 @@ class Orchestrator:
         if exit_code == 0:
             await self.db.update_task(task_id, status="completed", claude_session=None)
         elif exit_code < 0 or not self._running:
-            # Killed by signal or orchestrator shutting down — save session for resume
             await self.db.update_task(task_id, status="interrupted", claude_session=claude_sid)
-            logger.info(f"Task #{task_id} interrupted (session saved for resume)")
+            logger.info(f"Task #{task_id} interrupted (session {claude_sid})")
         else:
             await self.db.update_task(task_id, status="failed", claude_session=claude_sid)
             logger.warning(f"Task #{task_id} failed (exit {exit_code})")

@@ -213,16 +213,61 @@ class Database:
         async with self.conn.execute(query, params) as cursor:
             return [dict(row) for row in await cursor.fetchall()]
 
+    async def latest_session_for_task(self, task_id: int) -> dict | None:
+        """Return the most recent session for a given task."""
+        async with self.conn.execute(
+            "SELECT * FROM sessions WHERE task_id = ? ORDER BY started_at DESC LIMIT 1",
+            (task_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
     async def recover_interrupted_tasks(self) -> int:
-        """Reset in_progress tasks to open for restart recovery."""
+        """Mark in_progress tasks as interrupted and backfill session IDs for resume."""
         now = datetime.now(timezone.utc).isoformat()
+
+        # Find in_progress tasks that are missing a claude_session
+        async with self.conn.execute(
+            "SELECT t.id, s.log_path FROM tasks t "
+            "LEFT JOIN sessions s ON s.task_id = t.id "
+            "WHERE t.status = 'in_progress' AND t.claude_session IS NULL "
+            "ORDER BY s.started_at DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        for row in rows:
+            task_id, log_path = row["id"], row["log_path"]
+            if log_path:
+                claude_sid = self._extract_claude_session(log_path)
+                if claude_sid:
+                    await self.conn.execute(
+                        "UPDATE tasks SET claude_session = ? WHERE id = ?",
+                        (claude_sid, task_id),
+                    )
+
         cursor = await self.conn.execute(
-            "UPDATE tasks SET status = 'open', updated_at = ? "
+            "UPDATE tasks SET status = 'interrupted', updated_at = ? "
             "WHERE status = 'in_progress'",
             (now,),
         )
         await self.conn.commit()
         return cursor.rowcount
+
+    @staticmethod
+    def _extract_claude_session(log_path: str) -> str | None:
+        """Read a stream-json log file and extract the Claude session ID."""
+        try:
+            with open(log_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if "session_id" in data:
+                        return data["session_id"]
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+        return None
 
     async def mark_stale_running(self) -> int:
         now = datetime.now(timezone.utc).isoformat()

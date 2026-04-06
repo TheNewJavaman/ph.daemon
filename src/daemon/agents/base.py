@@ -92,20 +92,28 @@ class BaseAgent:
         prompt: str,
         interactive: bool = False,
         resume_session: str | None = None,
+        reuse_session: str | None = None,
     ) -> str:
-        """Spawn a claude subprocess and track it in the database."""
+        """Spawn a claude subprocess and track it in the database.
+
+        Args:
+            reuse_session: If set, reuse this phd session record instead of creating a new one.
+        """
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Pre-generate session_id so log_path property works before DB call
-        self.session_id = uuid.uuid4().hex[:12]
-
-        # Create session record
-        self.session_id = await self.db.create_session(
-            agent_type=self.agent_type.value,
-            task_id=self.task_id,
-            log_path=str(self.log_path),
-            session_id=self.session_id,
-        )
+        if reuse_session:
+            self.session_id = reuse_session
+            await self.db.update_session(
+                self.session_id, status="running", ended_at=None,
+            )
+        else:
+            self.session_id = uuid.uuid4().hex[:12]
+            self.session_id = await self.db.create_session(
+                agent_type=self.agent_type.value,
+                task_id=self.task_id,
+                log_path=str(self.log_path),
+                session_id=self.session_id,
+            )
 
         system_prompt = self._load_prompt()
         if interactive:
@@ -122,7 +130,8 @@ class BaseAgent:
                 system_prompt, prompt,
                 interactive=False, resume_session=resume_session,
             )
-            self._log_file = open(self.log_path, "w")
+            mode = "a" if reuse_session else "w"
+            self._log_file = open(self.log_path, mode)
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=self._log_file,
@@ -178,5 +187,5 @@ class BaseAgent:
         self._close_log()
         now = datetime.now(timezone.utc).isoformat()
         await self.db.update_session(
-            self.session_id, status="killed", ended_at=now
+            self.session_id, status="interrupted", ended_at=now
         )
