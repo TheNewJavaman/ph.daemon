@@ -1,31 +1,31 @@
 # ph.daemon
 
-Automated research harness that orchestrates Claude CLI agents to run experiments, implement features, and write papers — while you sleep.
+A terminal UI that orchestrates Claude CLI agents to implement tasks, run experiments, and write papers autonomously.
 
 ## What it does
 
-`phd` runs a loop: an orchestrator agent analyzes your research state, creates tasks, and spawns implementor agents to do the work. You interact through a terminal UI or CLI commands. Tasks, sessions, and agent logs are stored locally in SQLite.
+`phd` launches a TUI that manages a loop: a researcher agent analyzes your project state and creates tasks, then engineer agents pick them up and implement them. You stay in control — create tasks, define constraints, ask questions, pause/resume — all from the terminal.
 
 ```
 You (human)
   │
-  ├── phd create-task "Run ablation study on X"
-  ├── phd task "Add evaluation for Y"  (interactive planner)
-  ├── Message via TUI input bar
+  ├── Create tasks         (CLI or TUI)
+  ├── Define constraints   (interactive refinement chat)
+  ├── Ask questions        (ephemeral Q&A agent)
   │
   ▼
-Orchestrator (loop)
+Orchestrator (30s loop)
   │
-  ├── Director mode: analyze state → create tasks
-  ├── Implementor mode: pick task → spawn Claude agent → commit results
+  ├── Has tasks? → spawn engineer agent → implement → commit
+  ├── No tasks?  → spawn researcher agent → analyze state → create tasks
   │
   ▼
-Local SQLite (tasks, sessions, messages)
+SQLite DB (tasks, sessions, logs)
 ```
 
 ## Install
 
-Requires Python 3.12+ and the [Claude CLI](https://docs.anthropic.com/en/docs/claude-code).
+Requires Python 3.12+, [Claude CLI](https://docs.anthropic.com/en/docs/claude-code), and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv tool install -e .
@@ -34,88 +34,109 @@ uv tool install -e .
 ## Quick start
 
 ```bash
-# Initialize in your project directory
 cd my-research-project
 phd init
-
-# Create a task manually
-phd create-task "Implement baseline evaluation" -d "Run the standard benchmark suite and record results"
-
-# Launch the TUI — orchestrator starts automatically
+phd create-task "Implement baseline evaluation" -d "Run the standard benchmark suite"
 phd
 ```
+
+## TUI
+
+The interface has four views, navigated via the left sidebar:
+
+**Dashboard** — running agents, orchestrator status, and an LLM-generated activity summary that updates after each cycle.
+
+**Tasks** — full task queue sorted by priority then ID. Select a task to see its description, dependencies, and metadata in the detail pane.
+
+**Agents** — all sessions (running, completed, failed). Select a session to stream its logs live or review completed output. Logs are parsed from Claude's stream-JSON format and displayed with formatted tool calls, assistant messages, and results.
+
+**Constraints** — numbered project constraints on the left, interactive refinement chat on the right. Type a constraint idea, Claude refines it, and press `Ctrl+S` to save when satisfied.
+
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `p` | Pause / resume orchestrator |
+| `q` | Quit gracefully |
+| `t` | Toggle dark / light theme |
+| `Enter` | View selected row's details |
+| `Esc` | Back from detail view |
+| `Ctrl+S` | Save constraint (in constraints view) |
+
+The input bar at the bottom accepts messages to the orchestrator.
 
 ## CLI commands
 
 | Command | Description |
 |---------|-------------|
-| `phd` | Launch the terminal UI and orchestrator |
-| `phd init [path]` | Initialize a project (defaults to `.`) |
+| `phd` | Launch TUI + orchestrator |
+| `phd init [path]` | Initialize project (creates `.phd/`, `docs/`, etc.) |
 | `phd create-task "title" [-d desc] [-p priority] [--depends-on N]` | Create a task |
-| `phd task "description"` | Interactive planner session |
-| `phd constrain "description"` | Add a project constraint interactively |
+| `phd task "description"` | Interactive planner — decomposes into subtasks |
+| `phd constrain "description"` | Interactive constraint refinement |
 | `phd ask "question"` | Q&A about the project |
-| `phd paper` | Trigger a paper update |
-| `phd status` | Show running agents and task queue |
-
-## TUI
-
-The terminal UI uses your terminal's color palette — it looks native in any theme.
-
-- **Dashboard**: running agents, open tasks, loop status, recent commits
-- **Tasks**: task queue with status and priority
-- **Agents**: session list — press Enter to stream agent logs live
-- **Constraints**: view project constraints
-
-Keybindings: `p` pause/resume orchestrator, `q` quit, `Esc` back from log viewer.
-
-Type in the input bar at the bottom to message the orchestrator.
+| `phd paper` | Trigger paper update from recent commits |
+| `phd status` | Show running agents and task counts |
+| `phd reset-task N` | Reset a failed/interrupted task to open |
 
 ## How it works
 
-The orchestrator runs in a loop:
+### Orchestrator loop
 
-1. **Pick a task** — grab the next unblocked open task (dependencies resolved, sorted by priority)
-2. **Implement it** — spawn a Claude agent with the task context, constraints, and research state
-3. **On completion** — mark task done, loop back
-4. **If no tasks** — switch to director mode: analyze the codebase, paper, and research state, then create new tasks via `phd create-task`
+1. **Pick a task** — next unblocked task, sorted by priority. Interrupted tasks (with a resumable session) are preferred.
+2. **Spawn engineer** — Claude agent gets the task description, project constraints, and research state. Runs with full codebase access.
+3. **On completion** — mark done, update activity summary, loop back.
+4. **No tasks available** — spawn researcher agent to analyze the codebase, paper, and completed work, then generate 2–3 new tasks.
 
-### Safe exit
+### Agents
 
-When you quit (`q` or Ctrl+C):
-- Running agents are gracefully killed (SIGTERM → 5s → SIGKILL)
-- In-progress tasks reset to `open` for retry on restart
-- Dirty git working tree is auto-stashed (`git stash pop` to restore)
+| Agent | Role |
+|-------|------|
+| **Engineer** | Implements one task per session. Commits with task reference. Supports benchmark workflows (baseline → implement → measure → keep/revert). |
+| **Researcher** | Analyzes project state and generates high-value tasks. Updates `docs/research-state.md`. |
+| **Planner** | Interactive — decomposes a feature request into subtasks with dependencies. |
+| **Ephemeral** | Interactive — answers questions about the codebase, manages constraints. Read-only to code. |
+| **Paper** | Updates LaTeX paper in `paper/` based on recent commits. |
 
-### Task priorities
+### Task lifecycle
 
-- `0` — human-created (picked up first)
-- `1` — auto-generated by the director
+Tasks have five states: `open` → `in_progress` → `completed` / `failed` / `interrupted`.
 
-### Dependencies
+- **Priority 0** (human-created) is picked before **priority 1** (auto-generated).
+- **Dependencies**: `phd create-task "Run eval" --depends-on 1 --depends-on 2` — blocked until all dependencies complete.
+- **Retries**: failed tasks retry up to 2 times with failure context appended.
+- **Session resume**: interrupted tasks resume the same Claude session instead of starting over.
 
-Tasks can depend on other tasks: `phd create-task "Run eval" --depends-on 1 --depends-on 2`. The orchestrator won't pick up a task until all its dependencies are completed.
+### Graceful shutdown
+
+When you quit (`q` or `Ctrl+C`):
+- Running agents receive SIGTERM, then SIGKILL after 5 seconds
+- In-progress tasks are marked `interrupted` with session ID preserved for resume
+- Dirty git working tree is auto-stashed
 
 ## Project structure
+
+After `phd init`, your project gets:
 
 ```
 my-project/
 ├── .phd/
-│   ├── config.json       # project config
-│   ├── daemon.db          # SQLite: tasks, sessions, messages
-│   └── logs/              # agent session logs (JSONL)
+│   ├── config.json          # project config
+│   ├── daemon.db            # SQLite (WAL mode): tasks, sessions, conversations
+│   └── logs/                # agent session logs (JSONL)
 ├── docs/
-│   ├── constraints.md     # project constraints
-│   └── research-state.md  # maintained by director agent
-└── paper/                 # LaTeX paper (optional)
+│   ├── constraints.md       # numbered project constraints
+│   └── research-state.md    # maintained by researcher agent
+├── paper/                   # LaTeX paper (optional)
+└── CLAUDE.md                # instructions for Claude agents
 ```
 
 ## Agent prompts
 
 Agent behavior is defined in `prompts/`:
 
-- **director.md** — analyzes research state, creates tasks
-- **implementor.md** — implements one task per session, commits with task reference
-- **planner.md** — decomposes feature requests into tasks
-- **paper.md** — updates LaTeX paper from recent commits
+- **engineer.md** — task implementation, commit workflow, benchmark evaluation
+- **researcher.md** — state analysis, task generation, research-state updates
+- **planner.md** — feature decomposition into dependent subtasks
 - **ephemeral.md** — Q&A and constraint management
+- **paper.md** — LaTeX paper updates from commit history
