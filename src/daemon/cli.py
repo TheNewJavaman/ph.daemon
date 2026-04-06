@@ -87,6 +87,15 @@ def main(ctx: click.Context) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if ctx.invoked_subcommand is None:
         config = _get_config()
+        # Redirect logging to a file so it doesn't corrupt the TUI
+        log_file = config.daemon_dir / "daemon.log"
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s: %(message)s",
+            filename=str(log_file),
+        )
         from daemon.tui import DaemonApp
         try:
             DaemonApp(config=config).run()
